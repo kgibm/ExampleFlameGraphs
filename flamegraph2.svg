@@ -1,0 +1,2629 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1600" height="742" onload="init(evt)" viewBox="0 0 1600 742" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0">
+		<stop stop-color="#f8f8f8" offset="5%"/>
+		<stop stop-color="#e8e8e8" offset="95%"/>
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.6; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames &gt; *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	window.addEventListener("contextmenu", function(evt) {
+		var target = find_group(evt.target);
+		if (target) {
+			var strToAlert = "";
+			var width = parseFloat(target.children[1].getAttribute("width"));
+			var height = parseFloat(target.children[1].getAttribute("height"));
+			var xmin = parseFloat(target.children[1].getAttribute("x"));
+			var xmax = parseFloat(xmin + width);
+			var ymin = parseFloat(target.children[1].getAttribute("y"));
+
+			// XXX: Workaround for JavaScript float issues (fix me)
+			var fudge = 0.0001;
+			var stack = [];
+			var el = document.getElementById("frames").children;
+			for (var i = 0; i < el.length; i++) {
+				var e = el[i];
+				var a = find_child(e, "rect").attributes;
+				var ex = parseFloat(a.x.value);
+				var ew = parseFloat(a.width.value);
+				var upstack;
+				if (0 == 0) {
+					// non-inverted
+					upstack = parseFloat(a.y.value) > ymin - height;
+				} else {
+					// inverted
+					upstack = parseFloat(a.y.value) < ymin + height;
+				}
+				if (upstack) {
+					if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+						stack.push({
+							y: parseFloat(a.y.value),
+							title: e.children[0].innerHTML,
+						});
+					}
+				}
+			}
+			
+			stack.sort((a, b) => {
+				if (a.y < b.y) { return -1; }
+				else if (a.y > b.y) { return 1; }
+				else { return 0; }
+			});
+
+			for (var i = 0; i < stack.length; i++) {
+				strToAlert += stack[i].title + "\n";
+			}
+
+			alert(strToAlert);
+		}
+		evt.preventDefault();
+	}, false);
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1600.0" height="742.0" fill="url(#background)"/>
+<text id="title" x="800.00" y="24">flamegraph_flags_.svg</text>
+<text id="details" x="10.00" y="725"> </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1490.00" y="24">Search</text>
+<text id="ignorecase" x="1574.00" y="24">ic</text>
+<text id="matched" x="1490.00" y="725"> </text>
+<g id="frames">
+<g class="">
+<title>java.lang.Thread.run(Thread.java:857) (1,755 samples, 5.56%)</title><rect x="361" y="645" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="361.0" _orig_width="87.8"/>
+<text x="364" y="655.5" _orig_x="364.00">java.lang.T..</text>
+</g>
+<g class="">
+<title>jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43) (1,755 samples, 5.56%)</title><rect x="1502.2" y="597" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.2" _orig_width="87.8"/>
+<text x="1505.2" y="607.5" _orig_x="1505.20">jdk.interna..</text>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder.collectRefs(DTFJIndexBuilder.java:6620) (3 samples, 0.01%)</title><rect x="1449.4" y="533" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.4" _orig_width="0.2"/>
+<text x="1452.4" y="543.5" _orig_x="1452.42"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1062) (1,754 samples, 5.55%)</title><rect x="10" y="613" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="623.5" _orig_x="13.00">java.util.c..</text>
+</g>
+<g class="">
+<title>java.io.FilterOutputStream.write(FilterOutputStream.java:108) (2 samples, 0.01%)</title><rect x="922" y="597" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="922.0" _orig_width="0.1"/>
+<text x="925" y="607.5" _orig_x="924.97"/>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.LockSupport.park(LockSupport.java:341) (80 samples, 0.25%)</title><rect x="624.7" y="613" width="4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="624.7" _orig_width="4.0"/>
+<text x="627.7" y="623.5" _orig_x="627.65"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.graphics.GC.textExtent(GC.java:4967) (2 samples, 0.01%)</title><rect x="1516.2" y="197" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.2" _orig_width="0.1"/>
+<text x="1519.2" y="207.5" _orig_x="1519.21"/>
+</g>
+<g class="">
+<title>java.util.Properties.getProperty(Properties.java:1102) (2 samples, 0.01%)</title><rect x="823" y="565" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.0" _orig_width="0.1"/>
+<text x="826" y="575.5" _orig_x="826.01"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Composite.WM_PAINT(Composite.java:1548) (2 samples, 0.01%)</title><rect x="1512.5" y="245" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.5" _orig_width="0.1"/>
+<text x="1515.5" y="255.5" _orig_x="1515.51"/>
+</g>
+<g class="">
+<title>org.eclipse.mat.ui.rcp.Application.start(Application.java:28) (1,753 samples, 5.55%)</title><rect x="1502.3" y="469" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="479.5" _orig_x="1505.30">org.eclips..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.ole.win32.OleFrame.getMsgProc(OleFrame.java:198) (5 samples, 0.02%)</title><rect x="1505.9" y="293" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1505.9" _orig_width="0.2"/>
+<text x="1508.9" y="303.5" _orig_x="1508.85"/>
+</g>
+<g class="">
+<title>all (31,582 samples, 100%)</title><rect x="10" y="693" width="1580" height="15.0" fill="rgb(255,0,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="1580.0"/>
+<text x="13" y="703.5" _orig_x="13.00">all </text>
+</g>
+<g class="">
+<title>java.lang.reflect.AccessibleObject.checkAccess(AccessibleObject.java:673) (5 samples, 0.02%)</title><rect x="829.5" y="597" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.5" _orig_width="0.3"/>
+<text x="832.5" y="607.5" _orig_x="832.52"/>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.LockSupport.park(LockSupport.java:341) (1,753 samples, 5.55%)</title><rect x="717.8" y="517" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="527.5" _orig_x="720.80">java.util.c..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.DrawText(Native Method) (2 samples, 0.01%)</title><rect x="1516.2" y="165" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.2" _orig_width="0.1"/>
+<text x="1519.2" y="175.5" _orig_x="1519.21"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.SnapshotFactoryImpl.parse(SnapshotFactoryImpl.java:456) (25 samples, 0.08%)</title><rect x="1449" y="597" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.0" _orig_width="1.2"/>
+<text x="1452" y="607.5" _orig_x="1451.97"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory.getOperatingSystemMXBean(ManagementFactory.java:389) (168 samples, 0.53%)</title><rect x="814.1" y="661" width="8.4" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="814.1" _orig_width="8.4"/>
+<text x="817.1" y="671.5" _orig_x="817.11"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,753 samples, 5.55%)</title><rect x="273.3" y="565" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="273.3" _orig_width="87.7"/>
+<text x="276.3" y="575.5" _orig_x="276.30">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.Collections$2.forEachRemaining(Collections.java:4861) (8 samples, 0.03%)</title><rect x="821.6" y="533" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.6" _orig_width="0.4"/>
+<text x="824.6" y="543.5" _orig_x="824.56"/>
+</g>
+<g class="">
+<title>main (1,755 samples, 5.56%)</title><rect x="1502.2" y="677" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.2" _orig_width="87.8"/>
+<text x="1505.2" y="687.5" _orig_x="1505.20">main </text>
+</g>
+<g class="">
+<title>Health Center (memory) (182 samples, 0.58%)</title><rect x="822.7" y="677" width="9.1" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="822.7" _orig_width="9.1"/>
+<text x="825.7" y="687.5" _orig_x="825.66"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,754 samples, 5.55%)</title><rect x="1009.9" y="597" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1009.9" _orig_width="87.8"/>
+<text x="1012.9" y="607.5" _orig_x="1012.92">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.concurrent.SynchronousQueue$TransferStack$SNode.block(SynchronousQueue.java:288) (22 samples, 0.07%)</title><rect x="920.8" y="533" width="1.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.1"/>
+<text x="923.8" y="543.5" _orig_x="923.82"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.readAndDispatch(Display.java:3658) (138 samples, 0.44%)</title><rect x="1509.2" y="325" width="6.9" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="1509.2" _orig_width="6.9"/>
+<text x="1512.2" y="335.5" _orig_x="1512.15"/>
+</g>
+<g class="">
+<title>org.eclipse.jface.util.Throttler.lambda$1(Throttler.java:67) (2 samples, 0.01%)</title><rect x="1516.3" y="261" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="271.5" _orig_x="1519.31"/>
+</g>
+<g class="">
+<title>sun.management.spi.PlatformMBeanProvider$PlatformComponent.getMBeans(PlatformMBeanProvider.java:197) (2 samples, 0.01%)</title><rect x="827.9" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.9" _orig_width="0.1"/>
+<text x="830.9" y="591.5" _orig_x="830.87"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$2$1.begin(ReferencePipeline.java:173) (2 samples, 0.01%)</title><rect x="828" y="485" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.0" _orig_width="0.1"/>
+<text x="831" y="495.5" _orig_x="831.02"/>
+</g>
+<g class="">
+<title>java.util.concurrent.SynchronousQueue$TransferStack.transfer(SynchronousQueue.java:397) (24 samples, 0.08%)</title><rect x="919.6" y="581" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="591.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>java.util.LinkedHashMap$LinkedEntrySet.forEach(LinkedHashMap.java:708) (2 samples, 0.01%)</title><rect x="1516.3" y="213" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="223.5" _orig_x="1519.31"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.core.internal.contexts.EclipseContext.processWaiting(EclipseContext.java:541) (2 samples, 0.01%)</title><rect x="1516.8" y="309" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.8" _orig_width="0.1"/>
+<text x="1519.8" y="319.5" _orig_x="1519.76"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.runTimer(Display.java:4170) (27 samples, 0.09%)</title><rect x="1510.8" y="277" width="1.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1510.8" _orig_width="1.4"/>
+<text x="1513.8" y="287.5" _orig_x="1513.80"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline.collect(ReferencePipeline.java:682) (17 samples, 0.05%)</title><rect x="828" y="565" width="0.8" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.0" _orig_width="0.8"/>
+<text x="831" y="575.5" _orig_x="830.97"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:219) (1,753 samples, 5.55%)</title><rect x="448.8" y="613" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="448.8" _orig_width="87.7"/>
+<text x="451.8" y="623.5" _orig_x="451.80">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.lang.Class.lookupCachedMethod(Class.java:4218) (2 samples, 0.01%)</title><rect x="829.1" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.1" _orig_width="0.1"/>
+<text x="832.1" y="591.5" _orig_x="832.12"/>
+</g>
+<g class="">
+<title>sun.management.spi.PlatformMBeanProvider$PlatformComponent.getMBeans(PlatformMBeanProvider.java:197) (3 samples, 0.01%)</title><rect x="820.7" y="629" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.7" _orig_width="0.2"/>
+<text x="823.7" y="639.5" _orig_x="823.71"/>
+</g>
+<g class="">
+<title>java.lang.Class$ReflectCache.find(Class.java:4129) (2 samples, 0.01%)</title><rect x="829.1" y="565" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.1" _orig_width="0.1"/>
+<text x="832.1" y="575.5" _orig_x="832.12"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaObject$1.next(PHDJavaObject.java:376) (3 samples, 0.01%)</title><rect x="1449.4" y="501" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.4" _orig_width="0.2"/>
+<text x="1452.4" y="511.5" _orig_x="1452.42"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3436) (24 samples, 0.08%)</title><rect x="919.6" y="565" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="575.5" _orig_x="922.57"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaClassLoader.findClasses(PHDJavaClassLoader.java:466) (5 samples, 0.02%)</title><rect x="1449.8" y="389" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.2"/>
+<text x="1452.8" y="399.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>java.lang.Runtime.freeMemory(Native Method) (4 samples, 0.01%)</title><rect x="1511.9" y="229" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.9" _orig_width="0.2"/>
+<text x="1514.9" y="239.5" _orig_x="1514.91"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.DominatorTree$Calculator.compute(DominatorTree.java:225) (2 samples, 0.01%)</title><rect x="1502" y="549" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1502.0" _orig_width="0.1"/>
+<text x="1505" y="559.5" _orig_x="1505.00"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.index.IndexReader$IntIndex1NReader.get(IndexReader.java:467) (2 samples, 0.01%)</title><rect x="1501.3" y="565" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.3" _orig_width="0.1"/>
+<text x="1504.3" y="575.5" _orig_x="1504.35"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.EventTable.sendEvent(EventTable.java:89) (4 samples, 0.01%)</title><rect x="1512.7" y="165" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="175.5" _orig_x="1515.66"/>
+</g>
+<g>
+<title>java.util.concurrent.ForkJoinPool.signalWork(ForkJoinPool.java:1588) (11 samples, 0.03%)</title><rect x="1474.2" y="437" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.2" _orig_width="0.6"/>
+<text x="1477.2" y="447.5" _orig_x="1477.23"/>
+</g>
+<g class="">
+<title>java.lang.String.contains(String.java:3624) (2 samples, 0.01%)</title><rect x="822.9" y="613" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.9" _orig_width="0.1"/>
+<text x="825.9" y="623.5" _orig_x="825.91"/>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection.size(Collections.java:1041) (2 samples, 0.01%)</title><rect x="824.6" y="421" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="824.6" _orig_width="0.1"/>
+<text x="827.6" y="431.5" _orig_x="827.56"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline.reduce(ReferencePipeline.java:662) (72 samples, 0.23%)</title><rect x="823.9" y="565" width="3.6" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="823.9" _orig_width="3.6"/>
+<text x="826.9" y="575.5" _orig_x="826.86"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Widget.sendEvent(Widget.java:1066) (4 samples, 0.01%)</title><rect x="1512.7" y="197" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="207.5" _orig_x="1515.66"/>
+</g>
+<g class="">
+<title>jdk.internal.misc.Unsafe.park(Native Method) (24 samples, 0.08%)</title><rect x="919.6" y="501" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="511.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:219) (2 samples, 0.01%)</title><rect x="1448.8" y="613" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1448.8" _orig_width="0.1"/>
+<text x="1451.8" y="623.5" _orig_x="1451.82"/>
+</g>
+<g class="">
+<title>java.util.HashMap.&lt;init&gt;(HashMap.java:462) (2 samples, 0.01%)</title><rect x="820" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.0" _orig_width="0.1"/>
+<text x="823" y="591.5" _orig_x="822.96"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory$PlatformMBeanFinder.lambda$findSingleton$1(ManagementFactory.java:991) (54 samples, 0.17%)</title><rect x="824.3" y="453" width="2.7" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="824.3" _orig_width="2.7"/>
+<text x="827.3" y="463.5" _orig_x="827.31"/>
+</g>
+<g class="">
+<title>java.util.HashMap.resize(HashMap.java:733) (3 samples, 0.01%)</title><rect x="826.8" y="373" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="826.8" _orig_width="0.1"/>
+<text x="829.8" y="383.5" _orig_x="829.77"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.graphics.GC.textExtentInPixels(GC.java:5026) (2 samples, 0.01%)</title><rect x="1516.2" y="181" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.2" _orig_width="0.1"/>
+<text x="1519.2" y="191.5" _orig_x="1519.21"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:79) (16 samples, 0.05%)</title><rect x="824.7" y="437" width="0.8" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="824.7" _orig_width="0.8"/>
+<text x="827.7" y="447.5" _orig_x="827.66"/>
+</g>
+<g>
+<title>java.util.concurrent.ForkJoinTask.join(ForkJoinTask.java:670) (8 samples, 0.03%)</title><rect x="1474.8" y="501" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.8" _orig_width="0.4"/>
+<text x="1477.8" y="511.5" _orig_x="1477.78"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory.getPlatformMXBean(ManagementFactory.java:685) (112 samples, 0.35%)</title><rect x="814.2" y="645" width="5.6" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="814.2" _orig_width="5.6"/>
+<text x="817.2" y="655.5" _orig_x="817.16"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.snapshot.ObjectMarker.markSingleThreaded(ObjectMarker.java:148) (521 samples, 1.65%)</title><rect x="1475.2" y="549" width="26.1" height="15.0" fill="rgb(255,191,0)" rx="2" ry="2" _orig_x="1475.2" _orig_width="26.1"/>
+<text x="1478.2" y="559.5" _orig_x="1478.23">o..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.readAndDispatch(Display.java:3663) (8 samples, 0.03%)</title><rect x="1516.1" y="325" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.1" _orig_width="0.4"/>
+<text x="1519.1" y="335.5" _orig_x="1519.06"/>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.Workbench.lambda$3(Workbench.java:639) (1,753 samples, 5.55%)</title><rect x="1502.3" y="405" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="415.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.lang.ref.ReferenceQueue.remove(ReferenceQueue.java:137) (1,755 samples, 5.56%)</title><rect x="361" y="613" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="361.0" _orig_width="87.8"/>
+<text x="364" y="623.5" _orig_x="364.00">java.lang.r..</text>
+</g>
+<g class="">
+<title>jdk.internal.misc.Unsafe.park(Native Method) (28 samples, 0.09%)</title><rect x="628.7" y="597" width="1.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="628.7" _orig_width="1.4"/>
+<text x="631.7" y="607.5" _orig_x="631.65"/>
+</g>
+<g class="">
+<title>jdk.internal.misc.Unsafe.park(Native Method) (1,753 samples, 5.55%)</title><rect x="717.8" y="501" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="511.5" _orig_x="720.80">jdk.interna..</text>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:219) (3,512 samples, 11.12%)</title><rect x="1273.1" y="613" width="175.7" height="15.0" fill="rgb(255,97,0)" rx="2" ry="2" _orig_x="1273.1" _orig_width="175.7"/>
+<text x="1276.1" y="623.5" _orig_x="1276.12">java.lang.Object.wait(Ob..</text>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder.fill(DTFJIndexBuilder.java:2309) (10 samples, 0.03%)</title><rect x="1449.2" y="581" width="0.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.2" _orig_width="0.5"/>
+<text x="1452.2" y="591.5" _orig_x="1452.22"/>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.progress.ProgressViewUpdater.refreshJobInfo(ProgressViewUpdater.java:312) (2 samples, 0.01%)</title><rect x="1516.3" y="149" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="159.5" _orig_x="1519.31"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.index.IndexReader$IntIndexReader.get(IndexReader.java:1) (2 samples, 0.01%)</title><rect x="1501.3" y="533" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.3" _orig_width="0.1"/>
+<text x="1504.3" y="543.5" _orig_x="1504.35"/>
+</g>
+<g class="">
+<title>java.util.HashMap$KeySet.iterator(HashMap.java:983) (2 samples, 0.01%)</title><rect x="825.4" y="373" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="825.4" _orig_width="0.1"/>
+<text x="828.4" y="383.5" _orig_x="828.36"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:522) (89 samples, 0.28%)</title><rect x="815.1" y="549" width="4.4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="815.1" _orig_width="4.4"/>
+<text x="818.1" y="559.5" _orig_x="818.06"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.environment.EnvironmentDataProvider.getJMXData(EnvironmentDataProvider.java:52) (3 samples, 0.01%)</title><rect x="822.5" y="661" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.5" _orig_width="0.2"/>
+<text x="825.5" y="671.5" _orig_x="825.51"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:521) (8 samples, 0.03%)</title><rect x="821.1" y="549" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.1" _orig_width="0.4"/>
+<text x="824.1" y="559.5" _orig_x="824.06"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$3$1.accept(ReferencePipeline.java:197) (2 samples, 0.01%)</title><rect x="821.9" y="485" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.9" _orig_width="0.1"/>
+<text x="824.9" y="495.5" _orig_x="824.86"/>
+</g>
+<g class="">
+<title>sun.management.spi.PlatformMBeanProvider$PlatformComponent.getMBeans(PlatformMBeanProvider.java:198) (31 samples, 0.10%)</title><rect x="820.9" y="629" width="1.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.9" _orig_width="1.5"/>
+<text x="823.9" y="639.5" _orig_x="823.86"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,753 samples, 5.55%)</title><rect x="1097.7" y="597" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1097.7" _orig_width="87.7"/>
+<text x="1100.7" y="607.5" _orig_x="1100.67">java.lang.O..</text>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.SnapshotImpl.calculateDominatorTree(SnapshotImpl.java:1434) (5 samples, 0.02%)</title><rect x="1501.9" y="581" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.9" _orig_width="0.2"/>
+<text x="1504.9" y="591.5" _orig_x="1504.90"/>
+</g>
+<g class="">
+<title>jdk.internal.misc.Unsafe.park(Native Method) (80 samples, 0.25%)</title><rect x="624.7" y="597" width="4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="624.7" _orig_width="4.0"/>
+<text x="627.7" y="607.5" _orig_x="627.65"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1122) (22 samples, 0.07%)</title><rect x="920.8" y="629" width="1.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.1"/>
+<text x="923.8" y="639.5" _orig_x="923.82"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaClassLoader.findClasses(PHDJavaClassLoader.java:466) (4 samples, 0.01%)</title><rect x="1450" y="389" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1450.0" _orig_width="0.2"/>
+<text x="1453" y="399.5" _orig_x="1453.02"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,754 samples, 5.55%)</title><rect x="1009.9" y="613" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1009.9" _orig_width="87.8"/>
+<text x="1012.9" y="623.5" _orig_x="1012.92">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.wrapSink(AbstractPipeline.java:559) (4 samples, 0.01%)</title><rect x="828.6" y="501" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.6" _orig_width="0.2"/>
+<text x="831.6" y="511.5" _orig_x="831.62"/>
+</g>
+<g class="">
+<title>java.util.HashMap.resize(HashMap.java:705) (6 samples, 0.02%)</title><rect x="818.6" y="421" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="818.6" _orig_width="0.3"/>
+<text x="821.6" y="431.5" _orig_x="821.61"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDImageAddressSpace.&lt;init&gt;(PHDImageAddressSpace.java:57) (9 samples, 0.03%)</title><rect x="1449.8" y="469" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.4"/>
+<text x="1452.8" y="479.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.ui.internal.workbench.swt.PartRenderingEngine$5.run(PartRenderingEngine.java:1151) (281 samples, 0.89%)</title><rect x="1502.4" y="341" width="14.1" height="15.0" fill="rgb(255,195,0)" rx="2" ry="2" _orig_x="1502.4" _orig_width="14.1"/>
+<text x="1505.4" y="351.5" _orig_x="1505.40"/>
+</g>
+<g class="">
+<title>java.io.DataOutputStream.write(DataOutputStream.java:112) (2 samples, 0.01%)</title><rect x="922" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="922.0" _orig_width="0.1"/>
+<text x="925" y="591.5" _orig_x="924.97"/>
+</g>
+<g class="">
+<title>java.util.stream.StreamOpFlag.fromCharacteristics(StreamOpFlag.java:750) (4 samples, 0.01%)</title><rect x="823.7" y="533" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.7" _orig_width="0.2"/>
+<text x="826.7" y="543.5" _orig_x="826.66"/>
+</g>
+<g class="">
+<title>openj9.internal.tools.attach.target.CommonDirectory.waitSemaphore(CommonDirectory.java:264) (1,755 samples, 5.56%)</title><rect x="97.7" y="629" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="97.7" _orig_width="87.8"/>
+<text x="100.7" y="639.5" _orig_x="100.75">openj9.inte..</text>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,754 samples, 5.55%)</title><rect x="185.5" y="613" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="185.5" _orig_width="87.8"/>
+<text x="188.5" y="623.5" _orig_x="188.55">java.lang.O..</text>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.DominatorTree.calculate(DominatorTree.java:38) (5 samples, 0.02%)</title><rect x="1501.9" y="565" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.9" _orig_width="0.2"/>
+<text x="1504.9" y="575.5" _orig_x="1504.90"/>
+</g>
+<g>
+<title>java.lang.Thread.startImpl(Native Method) (10 samples, 0.03%)</title><rect x="1474.3" y="389" width="0.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.3" _orig_width="0.5"/>
+<text x="1477.3" y="399.5" _orig_x="1477.28"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.core.internal.contexts.EclipseContext.getParent(EclipseContext.java:419) (4 samples, 0.01%)</title><rect x="1516.5" y="309" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.5" _orig_width="0.2"/>
+<text x="1519.5" y="319.5" _orig_x="1519.51"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,754 samples, 5.55%)</title><rect x="922.2" y="613" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="922.2" _orig_width="87.7"/>
+<text x="925.2" y="623.5" _orig_x="925.17">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.lang.StringLatin1.indexOf(StringLatin1.java:235) (2 samples, 0.01%)</title><rect x="822.9" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.9" _orig_width="0.1"/>
+<text x="825.9" y="591.5" _orig_x="825.91"/>
+</g>
+<g class="">
+<title>java.util.HashMap$ValueSpliterator.forEachRemaining(HashMap.java:1782) (2 samples, 0.01%)</title><rect x="827.1" y="485" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.1" _orig_width="0.1"/>
+<text x="830.1" y="495.5" _orig_x="830.07"/>
+</g>
+<g class="">
+<title>java.util.HashMap$HashIterator.&lt;init&gt;(HashMap.java:1585) (2 samples, 0.01%)</title><rect x="817" y="389" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="817.0" _orig_width="0.1"/>
+<text x="820" y="399.5" _orig_x="820.01"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ScheduledThreadPoolExecutor$DelayedWorkQueue.take(ScheduledThreadPoolExecutor.java:1182) (1,754 samples, 5.55%)</title><rect x="10" y="581" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="591.5" _orig_x="13.00">java.util.c..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.graphics.GC.textExtentInPixels(GC.java:5026) (2 samples, 0.01%)</title><rect x="1512.8" y="53" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.8" _orig_width="0.1"/>
+<text x="1515.8" y="63.5" _orig_x="1515.76"/>
+</g>
+<g class="">
+<title>java.io.BufferedOutputStream.write(BufferedOutputStream.java:123) (2 samples, 0.01%)</title><rect x="922" y="565" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="922.0" _orig_width="0.1"/>
+<text x="925" y="575.5" _orig_x="924.97"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinPool.awaitWork(ForkJoinPool.java:1724) (80 samples, 0.25%)</title><rect x="624.7" y="629" width="4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="624.7" _orig_width="4.0"/>
+<text x="627.7" y="639.5" _orig_x="627.65"/>
+</g>
+<g class="">
+<title>java.lang.Thread.run(Thread.java:857) (8 samples, 0.03%)</title><rect x="536.5" y="661" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="536.5" _orig_width="0.4"/>
+<text x="539.5" y="671.5" _orig_x="539.50"/>
+</g>
+<g class="">
+<title>java.io.ClassByNameCache$Reaper.run(ClassByNameCache.java:232) (1,753 samples, 5.55%)</title><rect x="273.3" y="645" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="273.3" _orig_width="87.7"/>
+<text x="276.3" y="655.5" _orig_x="276.30">java.io.Clas..</text>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.progress.ProgressMonitorJobsDialog$2.subTask(ProgressMonitorJobsDialog.java:334) (2 samples, 0.01%)</title><rect x="1516.2" y="245" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.2" _orig_width="0.1"/>
+<text x="1519.2" y="255.5" _orig_x="1519.21"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.snapshot.ObjectMarker.markSingleThreaded(ObjectMarker.java:142) (20 samples, 0.06%)</title><rect x="1474.2" y="549" width="1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.2" _orig_width="1.0"/>
+<text x="1477.2" y="559.5" _orig_x="1477.23"/>
+</g>
+<g class="">
+<title>sun.management.spi.PlatformMBeanProvider$PlatformComponent.getMBeans(PlatformMBeanProvider.java:192) (12 samples, 0.04%)</title><rect x="819.8" y="629" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="819.8" _orig_width="0.6"/>
+<text x="822.8" y="639.5" _orig_x="822.81"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinPool.awaitWork(ForkJoinPool.java:1726) (28 samples, 0.09%)</title><rect x="628.7" y="629" width="1.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="628.7" _orig_width="1.4"/>
+<text x="631.7" y="639.5" _orig_x="631.65"/>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.awaitNanos(AbstractQueuedSynchronizer.java:1672) (8 samples, 0.03%)</title><rect x="536.5" y="581" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="536.5" _orig_width="0.4"/>
+<text x="539.5" y="591.5" _orig_x="539.50"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Canvas.windowProc(Canvas.java:340) (8 samples, 0.03%)</title><rect x="1512.5" y="277" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.5" _orig_width="0.4"/>
+<text x="1515.5" y="287.5" _orig_x="1515.51"/>
+</g>
+<g class="">
+<title>java.util.HashSet.add(HashSet.java:221) (18 samples, 0.06%)</title><rect x="826.1" y="421" width="0.9" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="826.1" _orig_width="0.9"/>
+<text x="829.1" y="431.5" _orig_x="829.06"/>
+</g>
+<g class="">
+<title>org.eclipse.equinox.launcher.Main.run(Main.java:1459) (1,755 samples, 5.56%)</title><rect x="1502.2" y="661" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.2" _orig_width="87.8"/>
+<text x="1505.2" y="671.5" _orig_x="1505.20">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.util.HashMap$HashIterator.nextNode(HashMap.java:1601) (4 samples, 0.01%)</title><rect x="816.8" y="437" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="816.8" _orig_width="0.2"/>
+<text x="819.8" y="447.5" _orig_x="819.81"/>
+</g>
+<g class="">
+<title>org.eclipse.core.internal.jobs.WorkerPool.sleep(WorkerPool.java:200) (3,512 samples, 11.12%)</title><rect x="1273.1" y="629" width="175.7" height="15.0" fill="rgb(255,97,0)" rx="2" ry="2" _orig_x="1273.1" _orig_width="175.7"/>
+<text x="1276.1" y="639.5" _orig_x="1276.12">org.eclipse.core.internal...</text>
+</g>
+<g class="">
+<title>org.eclipse.ui.application.WorkbenchAdvisor.eventLoopIdle(WorkbenchAdvisor.java:339) (1,459 samples, 4.62%)</title><rect x="1517" y="309" width="73" height="15.0" fill="rgb(255,177,0)" rx="2" ry="2" _orig_x="1517.0" _orig_width="73.0"/>
+<text x="1520" y="319.5" _orig_x="1520.01">org.eclip..</text>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.GarbageCleaner.clean(GarbageCleaner.java:422) (5 samples, 0.02%)</title><rect x="1501.5" y="581" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.5" _orig_width="0.3"/>
+<text x="1504.5" y="591.5" _orig_x="1504.55"/>
+</g>
+<g class="">
+<title>com.ibm.lang.management.internal.ExtendedOperatingSystemMXBeanImpl.getCpuLoad(ExtendedOperatingSystemMXBeanImpl.java:169) (169 samples, 0.54%)</title><rect x="805.7" y="645" width="8.4" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="805.7" _orig_width="8.4"/>
+<text x="808.7" y="655.5" _orig_x="808.65"/>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder.checkRefs(DTFJIndexBuilder.java:6448) (4 samples, 0.01%)</title><rect x="1449.4" y="549" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.4" _orig_width="0.2"/>
+<text x="1452.4" y="559.5" _orig_x="1452.37"/>
+</g>
+<g class="">
+<title>java.util.stream.ReduceOps$ReduceOp.evaluateSequential(ReduceOps.java:921) (27 samples, 0.09%)</title><rect x="821.1" y="581" width="1.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.1" _orig_width="1.3"/>
+<text x="824.1" y="591.5" _orig_x="824.06"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,753 samples, 5.55%)</title><rect x="1185.4" y="613" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1185.4" _orig_width="87.7"/>
+<text x="1188.4" y="623.5" _orig_x="1188.42">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:178) (55 samples, 0.17%)</title><rect x="824.3" y="469" width="2.7" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="824.3" _orig_width="2.7"/>
+<text x="827.3" y="479.5" _orig_x="827.26"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3436) (1,753 samples, 5.55%)</title><rect x="717.8" y="565" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="575.5" _orig_x="720.80">java.util.c..</text>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.getNextEvent(EventManager.java:396) (1,754 samples, 5.55%)</title><rect x="630.1" y="645" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="630.1" _orig_width="87.7"/>
+<text x="633.1" y="655.5" _orig_x="633.05">org.eclipse...</text>
+</g>
+<g class="">
+<title>org.eclipse.core.databinding.observable.Realm.runWithDefault(Realm.java:339) (1,753 samples, 5.55%)</title><rect x="1502.3" y="357" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="367.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory.getPlatformMXBean(ManagementFactory.java:685) (78 samples, 0.25%)</title><rect x="823.6" y="597" width="3.9" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="823.6" _orig_width="3.9"/>
+<text x="826.6" y="607.5" _orig_x="826.56"/>
+</g>
+<g class="">
+<title>org.eclipse.ui.PlatformUI.createAndRunWorkbench(PlatformUI.java:173) (1,753 samples, 5.55%)</title><rect x="1502.3" y="453" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="463.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.lang.reflect.Method.invoke(Method.java:574) (1,755 samples, 5.56%)</title><rect x="1502.2" y="613" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.2" _orig_width="87.8"/>
+<text x="1505.2" y="623.5" _orig_x="1505.20">java.lang.r..</text>
+</g>
+<g class="">
+<title>sun.management.spi.PlatformMBeanProvider$PlatformComponent.getMBeans(PlatformMBeanProvider.java:198) (17 samples, 0.05%)</title><rect x="828" y="581" width="0.8" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.0" _orig_width="0.8"/>
+<text x="831" y="591.5" _orig_x="830.97"/>
+</g>
+<g class="">
+<title>jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43) (38 samples, 0.12%)</title><rect x="829.8" y="597" width="1.9" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.8" _orig_width="1.9"/>
+<text x="832.8" y="607.5" _orig_x="832.82"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline.&lt;init&gt;(ReferencePipeline.java:96) (3 samples, 0.01%)</title><rect x="820.7" y="565" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.7" _orig_width="0.2"/>
+<text x="823.7" y="575.5" _orig_x="823.71"/>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.getNextEvent(EventManager.java:396) (1,754 samples, 5.55%)</title><rect x="185.5" y="645" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="185.5" _orig_width="87.8"/>
+<text x="188.5" y="655.5" _orig_x="188.55">org.eclipse...</text>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:522) (10 samples, 0.03%)</title><rect x="821.5" y="549" width="0.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.5" _orig_width="0.5"/>
+<text x="824.5" y="559.5" _orig_x="824.46"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.snapshot.ObjectMarker.countMarked(ObjectMarker.java:177) (521 samples, 1.65%)</title><rect x="1475.2" y="533" width="26.1" height="15.0" fill="rgb(255,191,0)" rx="2" ry="2" _orig_x="1475.2" _orig_width="26.1"/>
+<text x="1478.2" y="543.5" _orig_x="1478.23">o..</text>
+</g>
+<g class="">
+<title>java.util.concurrent.ConcurrentLinkedQueue.poll(ConcurrentLinkedQueue.java:395) (3 samples, 0.01%)</title><rect x="1516.1" y="261" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.1" _orig_width="0.1"/>
+<text x="1519.1" y="271.5" _orig_x="1519.06"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:219) (1,753 samples, 5.55%)</title><rect x="1185.4" y="645" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1185.4" _orig_width="87.7"/>
+<text x="1188.4" y="655.5" _orig_x="1188.42">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection$1.next(Collections.java:1054) (7 samples, 0.02%)</title><rect x="816.7" y="469" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="816.7" _orig_width="0.3"/>
+<text x="819.7" y="479.5" _orig_x="819.66"/>
+</g>
+<g class="">
+<title>org.apache.felix.scr.impl.ComponentActorThread.run(ComponentActorThread.java:83) (1,754 samples, 5.55%)</title><rect x="1009.9" y="645" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1009.9" _orig_width="87.8"/>
+<text x="1012.9" y="655.5" _orig_x="1012.92">org.apache...</text>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:635) (8 samples, 0.03%)</title><rect x="536.5" y="645" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="536.5" _orig_width="0.4"/>
+<text x="539.5" y="655.5" _orig_x="539.50"/>
+</g>
+<g class="">
+<title>java.util.HashMap.put(HashMap.java:610) (32 samples, 0.10%)</title><rect x="817.7" y="453" width="1.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="817.7" _orig_width="1.6"/>
+<text x="820.7" y="463.5" _orig_x="820.66"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$StatelessOp.&lt;init&gt;(ReferencePipeline.java:800) (3 samples, 0.01%)</title><rect x="820.7" y="581" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.7" _orig_width="0.2"/>
+<text x="823.7" y="591.5" _orig_x="823.71"/>
+</g>
+<g>
+<title>java.util.concurrent.ForkJoinPool.execute(ForkJoinPool.java:2651) (11 samples, 0.03%)</title><rect x="1474.2" y="485" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.2" _orig_width="0.6"/>
+<text x="1477.2" y="495.5" _orig_x="1477.23"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,751 samples, 5.54%)</title><rect x="536.9" y="613" width="87.6" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="536.9" _orig_width="87.6"/>
+<text x="539.9" y="623.5" _orig_x="539.90">java.lang.O..</text>
+</g>
+<g class="">
+<title>org.eclipse.e4.ui.internal.workbench.swt.PartRenderingEngine$5.run(PartRenderingEngine.java:1156) (1,462 samples, 4.63%)</title><rect x="1516.9" y="341" width="73.1" height="15.0" fill="rgb(255,177,0)" rx="2" ry="2" _orig_x="1516.9" _orig_width="73.1"/>
+<text x="1519.9" y="351.5" _orig_x="1519.86">org.eclip..</text>
+</g>
+<g>
+<title>java.util.concurrent.ForkJoinPool.externalPush(ForkJoinPool.java:2181) (11 samples, 0.03%)</title><rect x="1474.2" y="453" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.2" _orig_width="0.6"/>
+<text x="1477.2" y="463.5" _orig_x="1477.23"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:190) (1,753 samples, 5.55%)</title><rect x="1097.7" y="629" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1097.7" _orig_width="87.7"/>
+<text x="1100.7" y="639.5" _orig_x="1100.67">java.lang.O..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.ole.win32.OleFrame.lambda$1(OleFrame.java:152) (2 samples, 0.01%)</title><rect x="1511.1" y="261" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.1" _orig_width="0.1"/>
+<text x="1514.1" y="271.5" _orig_x="1514.11"/>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.getNextEvent(EventManager.java:396) (1,754 samples, 5.55%)</title><rect x="922.2" y="645" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="922.2" _orig_width="87.7"/>
+<text x="925.2" y="655.5" _orig_x="925.17">org.eclipse...</text>
+</g>
+<g class="">
+<title>ClassByNameCache Reaper (1,753 samples, 5.55%)</title><rect x="273.3" y="677" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="273.3" _orig_width="87.7"/>
+<text x="276.3" y="687.5" _orig_x="276.30">ClassByN..</text>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.LockSupport.parkNanos(LockSupport.java:252) (8 samples, 0.03%)</title><rect x="536.5" y="565" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="536.5" _orig_width="0.4"/>
+<text x="539.5" y="575.5" _orig_x="539.50"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1062) (24 samples, 0.08%)</title><rect x="919.6" y="613" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="623.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:77) (7 samples, 0.02%)</title><rect x="824.3" y="437" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="824.3" _orig_width="0.4"/>
+<text x="827.3" y="447.5" _orig_x="827.31"/>
+</g>
+<g class="">
+<title>java.util.HashMap.getNode(HashMap.java:568) (2 samples, 0.01%)</title><rect x="1512.4" y="245" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.4" _orig_width="0.1"/>
+<text x="1515.4" y="255.5" _orig_x="1515.36"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.GarbageCleaner.clean(GarbageCleaner.java:390) (2 samples, 0.01%)</title><rect x="1501.3" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.3" _orig_width="0.1"/>
+<text x="1504.3" y="591.5" _orig_x="1504.35"/>
+</g>
+<g class="">
+<title>org.eclipse.core.internal.jobs.Worker.run(Worker.java:58) (3,514 samples, 11.13%)</title><rect x="1273.1" y="661" width="175.8" height="15.0" fill="rgb(255,97,0)" rx="2" ry="2" _orig_x="1273.1" _orig_width="175.8"/>
+<text x="1276.1" y="671.5" _orig_x="1276.12">org.eclipse.core.internal...</text>
+</g>
+<g class="">
+<title>java.util.Collections$2.tryAdvance(Collections.java:4853) (10 samples, 0.03%)</title><rect x="828.1" y="469" width="0.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.1" _orig_width="0.5"/>
+<text x="831.1" y="479.5" _orig_x="831.12"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.memory.MemoryDataProvider.getPhysicalMemorySizeImpl(MemoryDataProvider.java:64) (4 samples, 0.01%)</title><rect x="822.9" y="629" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.9" _orig_width="0.2"/>
+<text x="825.9" y="639.5" _orig_x="825.91"/>
+</g>
+<g class="">
+<title>java.util.HashMap.put(HashMap.java:610) (3 samples, 0.01%)</title><rect x="820.3" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.3" _orig_width="0.1"/>
+<text x="823.3" y="591.5" _orig_x="823.26"/>
+</g>
+<g class="">
+<title>SCR Component Actor (1,754 samples, 5.55%)</title><rect x="1009.9" y="677" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1009.9" _orig_width="87.8"/>
+<text x="1012.9" y="687.5" _orig_x="1012.92">SCR Comp..</text>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder$DumpCache.getDump(DTFJIndexBuilder.java:9724) (9 samples, 0.03%)</title><rect x="1449.8" y="565" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.4"/>
+<text x="1452.8" y="575.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.EventTable.hooks(EventTable.java:73) (2 samples, 0.01%)</title><rect x="1589.9" y="229" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1589.9" _orig_width="0.1"/>
+<text x="1592.9" y="239.5" _orig_x="1592.90"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.core.internal.contexts.EclipseContext.processWaiting(EclipseContext.java:541) (4 samples, 0.01%)</title><rect x="1516.5" y="325" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.5" _orig_width="0.2"/>
+<text x="1519.5" y="335.5" _orig_x="1519.51"/>
+</g>
+<g class="">
+<title>java.io.FileOutputStream.write(FileOutputStream.java:349) (2 samples, 0.01%)</title><rect x="922" y="549" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="922.0" _orig_width="0.1"/>
+<text x="925" y="559.5" _orig_x="924.97"/>
+</g>
+<g class="">
+<title>IntIndexStreamer-Writer (25 samples, 0.08%)</title><rect x="920.8" y="677" width="1.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.3"/>
+<text x="923.8" y="687.5" _orig_x="923.82"/>
+</g>
+<g class="">
+<title>Worker-X (6,332 samples, 20.05%)</title><rect x="1185.4" y="677" width="316.8" height="15.0" fill="rgb(255,95,0)" rx="2" ry="2" _orig_x="1185.4" _orig_width="316.8"/>
+<text x="1188.4" y="687.5" _orig_x="1188.42">Worker-X </text>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$3.&lt;init&gt;(ReferencePipeline.java:191) (2 samples, 0.01%)</title><rect x="827.9" y="549" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.9" _orig_width="0.1"/>
+<text x="830.9" y="559.5" _orig_x="830.87"/>
+</g>
+<g class="">
+<title>java.util.concurrent.SynchronousQueue$TransferStack.transfer(SynchronousQueue.java:397) (22 samples, 0.07%)</title><rect x="920.8" y="581" width="1.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.1"/>
+<text x="923.8" y="591.5" _orig_x="923.82"/>
+</g>
+<g class="">
+<title>jdk.internal.misc.Unsafe.park(Native Method) (8 samples, 0.03%)</title><rect x="536.5" y="549" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="536.5" _orig_width="0.4"/>
+<text x="539.5" y="559.5" _orig_x="539.50"/>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection$1.hasNext(Collections.java:1053) (3 samples, 0.01%)</title><rect x="816.5" y="469" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="816.5" _orig_width="0.2"/>
+<text x="819.5" y="479.5" _orig_x="819.51"/>
+</g>
+<g class="">
+<title>java.lang.ref.ReferenceQueue.remove(ReferenceQueue.java:109) (1,753 samples, 5.55%)</title><rect x="448.8" y="645" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="448.8" _orig_width="87.7"/>
+<text x="451.8" y="655.5" _orig_x="451.80">java.lang.r..</text>
+</g>
+<g class="">
+<title>Bundle File Closer (1,754 samples, 5.55%)</title><rect x="185.5" y="677" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="185.5" _orig_width="87.8"/>
+<text x="188.5" y="687.5" _orig_x="188.55">Bundle File ..</text>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.snapshot.ObjectMarker.markMultiThreaded(ObjectMarker.java:162) (11 samples, 0.03%)</title><rect x="1474.2" y="533" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.2" _orig_width="0.6"/>
+<text x="1477.2" y="543.5" _orig_x="1477.23"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.messageProc(Display.java:3328) (4 samples, 0.01%)</title><rect x="1512.2" y="293" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.2" _orig_width="0.2"/>
+<text x="1515.2" y="303.5" _orig_x="1515.16"/>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection.iterator(Collections.java:1050) (5 samples, 0.02%)</title><rect x="825.2" y="421" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="825.2" _orig_width="0.3"/>
+<text x="828.2" y="431.5" _orig_x="828.21"/>
+</g>
+<g class="">
+<title>java.util.HashMap.resize(HashMap.java:733) (2 samples, 0.01%)</title><rect x="818.9" y="421" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="818.9" _orig_width="0.1"/>
+<text x="821.9" y="431.5" _orig_x="821.91"/>
+</g>
+<g class="">
+<title>org.eclipse.jface.util.Throttler.lambda$1(Throttler.java:67) (2 samples, 0.01%)</title><rect x="1516.3" y="117" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="127.5" _orig_x="1519.31"/>
+</g>
+<g class="">
+<title>jdk.internal.reflect.Reflection.verifyMemberAccess(Reflection.java:141) (2 samples, 0.01%)</title><rect x="829.7" y="549" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.7" _orig_width="0.1"/>
+<text x="832.7" y="559.5" _orig_x="832.67"/>
+</g>
+<g class="">
+<title>com.sun.management.OperatingSystemMXBean.getTotalPhysicalMemorySize(OperatingSystemMXBean.java:122) (21 samples, 0.07%)</title><rect x="830.7" y="565" width="1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="830.7" _orig_width="1.0"/>
+<text x="833.7" y="575.5" _orig_x="833.67"/>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.run(EventManager.java:337) (1,754 samples, 5.55%)</title><rect x="185.5" y="661" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="185.5" _orig_width="87.8"/>
+<text x="188.5" y="671.5" _orig_x="188.55">org.eclipse...</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Widget.sendEvent(Widget.java:1075) (4 samples, 0.01%)</title><rect x="1512.7" y="229" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="239.5" _orig_x="1515.66"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.KillTimer(Native Method) (16 samples, 0.05%)</title><rect x="1510" y="261" width="0.8" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1510.0" _orig_width="0.8"/>
+<text x="1513" y="271.5" _orig_x="1513.00"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.RunnableLock.run(RunnableLock.java:40) (5 samples, 0.02%)</title><rect x="1516.2" y="277" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.2" _orig_width="0.3"/>
+<text x="1519.2" y="287.5" _orig_x="1519.21"/>
+</g>
+<g class="">
+<title>org.eclipse.equinox.launcher.Main.invokeFramework(Main.java:651) (1,755 samples, 5.56%)</title><rect x="1502.2" y="629" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.2" _orig_width="87.8"/>
+<text x="1505.2" y="639.5" _orig_x="1505.20">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.lang.Thread.run(Thread.java:857) (25 samples, 0.08%)</title><rect x="920.8" y="661" width="1.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.3"/>
+<text x="923.8" y="671.5" _orig_x="923.82"/>
+</g>
+<g>
+<title>java.util.concurrent.ForkJoinPool.externalSubmit(ForkJoinPool.java:2196) (11 samples, 0.03%)</title><rect x="1474.2" y="469" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.2" _orig_width="0.6"/>
+<text x="1477.2" y="479.5" _orig_x="1477.23"/>
+</g>
+<g class="">
+<title>java.lang.System.getProperty(System.java:641) (2 samples, 0.01%)</title><rect x="823" y="597" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.0" _orig_width="0.1"/>
+<text x="826" y="607.5" _orig_x="826.01"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.CallWindowProc(Native Method) (58 samples, 0.18%)</title><rect x="1513.2" y="245" width="2.9" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1513.2" _orig_width="2.9"/>
+<text x="1516.2" y="255.5" _orig_x="1516.16"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.DefWindowProc(Native Method) (4 samples, 0.01%)</title><rect x="1512.2" y="277" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.2" _orig_width="0.2"/>
+<text x="1515.2" y="287.5" _orig_x="1515.16"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$2$1.begin(ReferencePipeline.java:173) (3 samples, 0.01%)</title><rect x="821.3" y="533" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.3" _orig_width="0.2"/>
+<text x="824.3" y="543.5" _orig_x="824.31"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDImage.&lt;init&gt;(PHDImage.java:66) (9 samples, 0.03%)</title><rect x="1449.8" y="501" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.4"/>
+<text x="1452.8" y="511.5" _orig_x="1452.77"/>
+</g>
+<g>
+<title>java.lang.Thread.start(Thread.java:1041) (10 samples, 0.03%)</title><rect x="1474.3" y="405" width="0.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.3" _orig_width="0.5"/>
+<text x="1477.3" y="415.5" _orig_x="1477.28"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,754 samples, 5.55%)</title><rect x="630.1" y="597" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="630.1" _orig_width="87.7"/>
+<text x="633.1" y="607.5" _orig_x="633.05">java.lang.O..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.sendJDKInternalEvent(Display.java:4239) (2 samples, 0.01%)</title><rect x="1589.9" y="261" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1589.9" _orig_width="0.1"/>
+<text x="1592.9" y="271.5" _orig_x="1592.90"/>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder.getUncachedDump(DTFJIndexBuilder.java:9130) (9 samples, 0.03%)</title><rect x="1449.8" y="549" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.4"/>
+<text x="1452.8" y="559.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>org.eclipse.core.runtime.internal.adaptor.EclipseAppLauncher.runApplication(EclipseAppLauncher.java:143) (1,753 samples, 5.55%)</title><rect x="1502.3" y="501" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="511.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,753 samples, 5.55%)</title><rect x="448.8" y="597" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="448.8" _orig_width="87.7"/>
+<text x="451.8" y="607.5" _orig_x="451.80">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:239) (28 samples, 0.09%)</title><rect x="821" y="597" width="1.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.0" _orig_width="1.4"/>
+<text x="824" y="607.5" _orig_x="824.01"/>
+</g>
+<g class="">
+<title>java.util.HashMap.putVal(HashMap.java:627) (2 samples, 0.01%)</title><rect x="826.4" y="389" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="826.4" _orig_width="0.1"/>
+<text x="829.4" y="399.5" _orig_x="829.37"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.ole.win32.OleFrame.getMsgProc(OleFrame.java:307) (54 samples, 0.17%)</title><rect x="1506.1" y="293" width="2.7" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1506.1" _orig_width="2.7"/>
+<text x="1509.1" y="303.5" _orig_x="1509.10"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:178) (82 samples, 0.26%)</title><rect x="815.2" y="517" width="4.1" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="815.2" _orig_width="4.1"/>
+<text x="818.2" y="527.5" _orig_x="818.21"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory$PlatformMBeanFinder.findSingleton(ManagementFactory.java:1006) (2 samples, 0.01%)</title><rect x="823.6" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.6" _orig_width="0.1"/>
+<text x="826.6" y="591.5" _orig_x="826.56"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:179) (10 samples, 0.03%)</title><rect x="828.1" y="453" width="0.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.1" _orig_width="0.5"/>
+<text x="831.1" y="463.5" _orig_x="831.12"/>
+</g>
+<g class="">
+<title>java.util.concurrent.SynchronousQueue$TransferStack$SNode.block(SynchronousQueue.java:288) (24 samples, 0.08%)</title><rect x="919.6" y="533" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="543.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1061) (8 samples, 0.03%)</title><rect x="536.5" y="613" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="536.5" _orig_width="0.4"/>
+<text x="539.5" y="623.5" _orig_x="539.50"/>
+</g>
+<g class="">
+<title>java.util.Properties.getProperty(Properties.java:1122) (2 samples, 0.01%)</title><rect x="823" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.0" _orig_width="0.1"/>
+<text x="826" y="591.5" _orig_x="826.01"/>
+</g>
+<g class="">
+<title>org.eclipse.core.internal.jobs.WorkerPool.startJob(WorkerPool.java:242) (3,512 samples, 11.12%)</title><rect x="1273.1" y="645" width="175.7" height="15.0" fill="rgb(255,97,0)" rx="2" ry="2" _orig_x="1273.1" _orig_width="175.7"/>
+<text x="1276.1" y="655.5" _orig_x="1276.12">org.eclipse.core.internal...</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.timerExec(Display.java:4914) (13 samples, 0.04%)</title><rect x="1511.3" y="245" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.3" _orig_width="0.6"/>
+<text x="1514.3" y="255.5" _orig_x="1514.26"/>
+</g>
+<g class="">
+<title>EventAdmin Async Event Dispatcher Thread (1,751 samples, 5.54%)</title><rect x="536.9" y="677" width="87.6" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="536.9" _orig_width="87.6"/>
+<text x="539.9" y="687.5" _orig_x="539.90">EventAdmi..</text>
+</g>
+<g class="">
+<title>Health Center (threads) (1,755 samples, 5.56%)</title><rect x="831.8" y="677" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="831.8" _orig_width="87.8"/>
+<text x="834.8" y="687.5" _orig_x="834.77">Health Cen..</text>
+</g>
+<g>
+<title>java.util.concurrent.ForkJoinPool.createWorker(ForkJoinPool.java:1465) (10 samples, 0.03%)</title><rect x="1474.3" y="421" width="0.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.3" _orig_width="0.5"/>
+<text x="1477.3" y="431.5" _orig_x="1477.28"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.readAndDispatch(Display.java:3655) (129 samples, 0.41%)</title><rect x="1502.4" y="325" width="6.5" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="1502.4" _orig_width="6.5"/>
+<text x="1505.4" y="335.5" _orig_x="1505.40"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Control.isFocusControl(Control.java:1904) (2 samples, 0.01%)</title><rect x="1511" y="245" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.0" _orig_width="0.1"/>
+<text x="1514" y="255.5" _orig_x="1514.01"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory.getPlatformMXBean(ManagementFactory.java:687) (27 samples, 0.09%)</title><rect x="827.5" y="597" width="1.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.5" _orig_width="1.3"/>
+<text x="830.5" y="607.5" _orig_x="830.47"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.index.IndexWriter$InboundWriter.processGiantSegmentFile(IndexWriter.java:1661) (2 samples, 0.01%)</title><rect x="1501.7" y="549" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.7" _orig_width="0.1"/>
+<text x="1504.7" y="559.5" _orig_x="1504.70"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.snapshot.ObjectMarker.markSingleThreaded(ObjectMarker.java:139) (478 samples, 1.51%)</title><rect x="1450.3" y="549" width="23.9" height="15.0" fill="rgb(255,192,0)" rx="2" ry="2" _orig_x="1450.3" _orig_width="23.9"/>
+<text x="1453.3" y="559.5" _orig_x="1453.32">o..</text>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,753 samples, 5.55%)</title><rect x="1097.7" y="613" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1097.7" _orig_width="87.7"/>
+<text x="1100.7" y="623.5" _orig_x="1100.67">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.HashMap.put(HashMap.java:610) (18 samples, 0.06%)</title><rect x="826.1" y="405" width="0.9" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="826.1" _orig_width="0.9"/>
+<text x="829.1" y="415.5" _orig_x="829.06"/>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.run(EventManager.java:337) (1,754 samples, 5.55%)</title><rect x="630.1" y="661" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="630.1" _orig_width="87.7"/>
+<text x="633.1" y="671.5" _orig_x="633.05">org.eclipse...</text>
+</g>
+<g class="">
+<title>jdk.internal.reflect.ReflectionFactory.getExecutableSharedParameterTypes(ReflectionFactory.java:341) (4 samples, 0.01%)</title><rect x="829.2" y="549" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.2" _orig_width="0.2"/>
+<text x="832.2" y="559.5" _orig_x="832.22"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.TypedListener.handleEvent(TypedListener.java:234) (4 samples, 0.01%)</title><rect x="1512.7" y="149" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="159.5" _orig_x="1515.66"/>
+</g>
+<g class="">
+<title>org.eclipse.core.internal.jobs.InternalWorker.run(InternalWorker.java:61) (1,753 samples, 5.55%)</title><rect x="1185.4" y="661" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1185.4" _orig_width="87.7"/>
+<text x="1188.4" y="671.5" _orig_x="1188.42">org.eclipse...</text>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3465) (1,753 samples, 5.55%)</title><rect x="717.8" y="549" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="559.5" _orig_x="720.80">java.util.c..</text>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.snapshot.ObjectMarker.lambda$2(ObjectMarker.java:162) (11 samples, 0.03%)</title><rect x="1474.2" y="501" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.2" _orig_width="0.6"/>
+<text x="1477.2" y="511.5" _orig_x="1477.23"/>
+</g>
+<g class="">
+<title>java.util.concurrent.SynchronousQueue.take(SynchronousQueue.java:886) (22 samples, 0.07%)</title><rect x="920.8" y="597" width="1.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.1"/>
+<text x="923.8" y="607.5" _orig_x="923.82"/>
+</g>
+<g class="">
+<title>java.io.FileOutputStream.writeBytes(Native Method) (2 samples, 0.01%)</title><rect x="922" y="533" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="922.0" _orig_width="0.1"/>
+<text x="925" y="543.5" _orig_x="924.97"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3465) (22 samples, 0.07%)</title><rect x="920.8" y="549" width="1.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.1"/>
+<text x="923.8" y="559.5" _orig_x="923.82"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.memory.MemoryDataProvider.getJMXData(MemoryDataProvider.java:25) (182 samples, 0.58%)</title><rect x="822.7" y="661" width="9.1" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="822.7" _orig_width="9.1"/>
+<text x="825.7" y="671.5" _orig_x="825.66"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.core.internal.contexts.ConcurrentNeutralValueMap.get(ConcurrentNeutralValueMap.java:53) (4 samples, 0.01%)</title><rect x="1516.5" y="293" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.5" _orig_width="0.2"/>
+<text x="1519.5" y="303.5" _orig_x="1519.51"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:522) (59 samples, 0.19%)</title><rect x="824.2" y="501" width="3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="824.2" _orig_width="3.0"/>
+<text x="827.2" y="511.5" _orig_x="827.21"/>
+</g>
+<g class="">
+<title>org.eclipse.core.runtime.internal.adaptor.EclipseAppLauncher.start(EclipseAppLauncher.java:109) (1,753 samples, 5.55%)</title><rect x="1502.3" y="517" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="527.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory$PlatformMBeanFinder.findSingleton(ManagementFactory.java:990) (4 samples, 0.01%)</title><rect x="823.7" y="581" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.7" _orig_width="0.2"/>
+<text x="826.7" y="591.5" _orig_x="826.66"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,755 samples, 5.56%)</title><rect x="361" y="581" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="361.0" _orig_width="87.8"/>
+<text x="364" y="591.5" _orig_x="364.00">java.lang.O..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.sendJDKInternalEvent(Display.java:4243) (2 samples, 0.01%)</title><rect x="1589.9" y="245" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1589.9" _orig_width="0.1"/>
+<text x="1592.9" y="255.5" _orig_x="1592.90"/>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder.fill(DTFJIndexBuilder.java:929) (9 samples, 0.03%)</title><rect x="1449.8" y="581" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.4"/>
+<text x="1452.8" y="591.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.CallNextHookEx(Native Method) (54 samples, 0.17%)</title><rect x="1506.1" y="277" width="2.7" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1506.1" _orig_width="2.7"/>
+<text x="1509.1" y="287.5" _orig_x="1509.10"/>
+</g>
+<g>
+<title>java.util.HashMap.getNode(HashMap.java:579) (3 samples, 0.01%)</title><rect x="1449.4" y="453" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.4" _orig_width="0.2"/>
+<text x="1452.4" y="463.5" _orig_x="1452.42"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaClassLoader.&lt;init&gt;(PHDJavaClassLoader.java:78) (5 samples, 0.02%)</title><rect x="1449.8" y="421" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.2"/>
+<text x="1452.8" y="431.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.memory.MemoryDataProvider.getMemoryInformation(MemoryDataProvider.java:33) (179 samples, 0.57%)</title><rect x="822.8" y="645" width="9" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="822.8" _orig_width="9.0"/>
+<text x="825.8" y="655.5" _orig_x="825.81"/>
+</g>
+<g class="">
+<title>java.lang.String.indexOf(String.java:3278) (2 samples, 0.01%)</title><rect x="822.9" y="597" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.9" _orig_width="0.1"/>
+<text x="825.9" y="607.5" _orig_x="825.91"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:77) (7 samples, 0.02%)</title><rect x="815.3" y="485" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="815.3" _orig_width="0.3"/>
+<text x="818.3" y="495.5" _orig_x="818.26"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.environment.EnvironmentDataProvider.reportCommandLine(EnvironmentDataProvider.java:92) (2 samples, 0.01%)</title><rect x="822.5" y="629" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.5" _orig_width="0.1"/>
+<text x="825.5" y="639.5" _orig_x="825.51"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaRuntime.findLoaders(PHDJavaRuntime.java:852) (4 samples, 0.01%)</title><rect x="1450" y="421" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1450.0" _orig_width="0.2"/>
+<text x="1453" y="431.5" _orig_x="1453.02"/>
+</g>
+<g class="">
+<title>java.lang.Class.getDeclaredMethod(Class.java:1132) (8 samples, 0.03%)</title><rect x="829" y="613" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.0" _orig_width="0.4"/>
+<text x="832" y="623.5" _orig_x="832.02"/>
+</g>
+<g class="">
+<title>jdk.internal.misc.Unsafe.park(Native Method) (1,754 samples, 5.55%)</title><rect x="10" y="533" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="543.5" _orig_x="13.00">jdk.interna..</text>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1623) (1,753 samples, 5.55%)</title><rect x="717.8" y="581" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="591.5" _orig_x="720.80">java.util.c..</text>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.getNextEvent(EventManager.java:396) (1,753 samples, 5.55%)</title><rect x="1097.7" y="645" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1097.7" _orig_width="87.7"/>
+<text x="1100.7" y="655.5" _orig_x="1100.67">org.eclipse...</text>
+</g>
+<g>
+<title>org.eclipse.mat.parser.index.IndexWriter$IntIndex.get(IndexWriter.java:473) (2 samples, 0.01%)</title><rect x="1501.3" y="517" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.3" _orig_width="0.1"/>
+<text x="1504.3" y="527.5" _orig_x="1504.35"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.BeginPaint(Native Method) (2 samples, 0.01%)</title><rect x="1512.5" y="197" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.5" _orig_width="0.1"/>
+<text x="1515.5" y="207.5" _orig_x="1515.51"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:190) (1,754 samples, 5.55%)</title><rect x="922.2" y="629" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="922.2" _orig_width="87.7"/>
+<text x="925.2" y="639.5" _orig_x="925.17">java.lang.O..</text>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ThreadMXBeanImpl.getThreadInfo(ThreadMXBeanImpl.java:313) (1,755 samples, 5.56%)</title><rect x="831.8" y="629" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="831.8" _orig_width="87.8"/>
+<text x="834.8" y="639.5" _orig_x="834.77">com.ibm.ja..</text>
+</g>
+<g class="">
+<title>java.lang.Thread.run(Thread.java:857) (25 samples, 0.08%)</title><rect x="919.6" y="661" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="671.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.LockSupport.parkNanos(LockSupport.java:252) (1,754 samples, 5.55%)</title><rect x="10" y="549" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="559.5" _orig_x="13.00">java.util.c..</text>
+</g>
+<g class="">
+<title>com.ibm.lang.management.internal.ExtendedOperatingSystemMXBeanImpl.getSystemCpuLoadImpl(Native Method) (169 samples, 0.54%)</title><rect x="805.7" y="629" width="8.4" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="805.7" _orig_width="8.4"/>
+<text x="808.7" y="639.5" _orig_x="808.65"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Synchronizer.runAsyncMessages(Synchronizer.java:125) (3 samples, 0.01%)</title><rect x="1516.1" y="293" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.1" _orig_width="0.1"/>
+<text x="1519.1" y="303.5" _orig_x="1519.06"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:521) (2 samples, 0.01%)</title><rect x="828" y="501" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.0" _orig_width="0.1"/>
+<text x="831" y="511.5" _orig_x="831.02"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Control.hasFocus(Control.java:1737) (2 samples, 0.01%)</title><rect x="1511" y="229" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.0" _orig_width="0.1"/>
+<text x="1514" y="239.5" _orig_x="1514.01"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.GarbageCleaner.clean(GarbageCleaner.java:400) (2 samples, 0.01%)</title><rect x="1501.4" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.4" _orig_width="0.1"/>
+<text x="1504.4" y="591.5" _orig_x="1504.45"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:635) (1,753 samples, 5.55%)</title><rect x="717.8" y="645" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="655.5" _orig_x="720.80">java.util.c..</text>
+</g>
+<g class="">
+<title>org.eclipse.jface.util.Throttler.lambda$0(Throttler.java:59) (2 samples, 0.01%)</title><rect x="1516.3" y="245" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="255.5" _orig_x="1519.31"/>
+</g>
+<g class="">
+<title>java.util.HashMap.get(HashMap.java:556) (2 samples, 0.01%)</title><rect x="1512.4" y="261" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.4" _orig_width="0.1"/>
+<text x="1515.4" y="271.5" _orig_x="1515.36"/>
+</g>
+<g class="">
+<title>Health Center (environment) (3 samples, 0.01%)</title><rect x="822.5" y="677" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.5" _orig_width="0.2"/>
+<text x="825.5" y="687.5" _orig_x="825.51"/>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder.processHeapObject(DTFJIndexBuilder.java:4177) (4 samples, 0.01%)</title><rect x="1449.4" y="565" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.4" _orig_width="0.2"/>
+<text x="1452.4" y="575.5" _orig_x="1452.37"/>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.progress.ProgressManager.notifyListeners(ProgressManager.java:387) (2 samples, 0.01%)</title><rect x="1516.3" y="229" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="239.5" _orig_x="1519.31"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline.collect(ReferencePipeline.java:682) (29 samples, 0.09%)</title><rect x="821" y="613" width="1.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.0" _orig_width="1.4"/>
+<text x="824" y="623.5" _orig_x="823.96"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Control.windowProc(Control.java:4801) (8 samples, 0.03%)</title><rect x="1512.5" y="261" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.5" _orig_width="0.4"/>
+<text x="1515.5" y="271.5" _orig_x="1515.51"/>
+</g>
+<g class="">
+<title>java.lang.Thread.run(Thread.java:857) (1,753 samples, 5.55%)</title><rect x="717.8" y="661" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="671.5" _orig_x="720.80">java.lang.T..</text>
+</g>
+<g>
+<title>java.util.ArrayList.forEach(ArrayList.java:1511) (11 samples, 0.03%)</title><rect x="1474.2" y="517" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.2" _orig_width="0.6"/>
+<text x="1477.2" y="527.5" _orig_x="1477.23"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1062) (22 samples, 0.07%)</title><rect x="920.8" y="613" width="1.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.1"/>
+<text x="923.8" y="623.5" _orig_x="923.82"/>
+</g>
+<g class="">
+<title>java.lang.StringBuilder.append(StringBuilder.java:259) (3 samples, 0.01%)</title><rect x="822.7" y="629" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.7" _orig_width="0.1"/>
+<text x="825.7" y="639.5" _orig_x="825.66"/>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.Workbench$1.eventLoopIdle(Workbench.java:474) (1,459 samples, 4.62%)</title><rect x="1517" y="325" width="73" height="15.0" fill="rgb(255,177,0)" rx="2" ry="2" _orig_x="1517.0" _orig_width="73.0"/>
+<text x="1520" y="335.5" _orig_x="1520.01">org.eclip..</text>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.progress.ProgressManagerUtil.clipToSize(ProgressManagerUtil.java:222) (2 samples, 0.01%)</title><rect x="1512.8" y="85" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.8" _orig_width="0.1"/>
+<text x="1515.8" y="95.5" _orig_x="1515.76"/>
+</g>
+<g class="">
+<title>Refresh Thread: Equinox Container: UUID (1,754 samples, 5.55%)</title><rect x="922.2" y="677" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="922.2" _orig_width="87.7"/>
+<text x="925.2" y="687.5" _orig_x="925.17">Refresh Thr..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.getControl(Display.java:1626) (2 samples, 0.01%)</title><rect x="1512.4" y="277" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.4" _orig_width="0.1"/>
+<text x="1515.4" y="287.5" _orig_x="1515.36"/>
+</g>
+<g class="">
+<title>java.util.stream.Sink$ChainedReference.begin(Sink.java:253) (3 samples, 0.01%)</title><rect x="821.3" y="517" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.3" _orig_width="0.2"/>
+<text x="824.3" y="527.5" _orig_x="824.31"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ScheduledThreadPoolExecutor$DelayedWorkQueue.take(ScheduledThreadPoolExecutor.java:899) (1,754 samples, 5.55%)</title><rect x="10" y="597" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="607.5" _orig_x="13.00">java.util.c..</text>
+</g>
+<g>
+<title>org.eclipse.mat.snapshot.SnapshotFactory.openSnapshot(SnapshotFactory.java:149) (1,064 samples, 3.37%)</title><rect x="1449" y="629" width="53.2" height="15.0" fill="rgb(255,183,0)" rx="2" ry="2" _orig_x="1449.0" _orig_width="53.2"/>
+<text x="1452" y="639.5" _orig_x="1451.97">org.e..</text>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.HeapStatus.updateStats(HeapStatus.java:485) (4 samples, 0.01%)</title><rect x="1511.9" y="245" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.9" _orig_width="0.2"/>
+<text x="1514.9" y="255.5" _orig_x="1514.91"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ThreadMXBeanImpl.getThreadInfoCommon(ThreadMXBeanImpl.java:353) (1,755 samples, 5.56%)</title><rect x="831.8" y="613" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="831.8" _orig_width="87.8"/>
+<text x="834.8" y="623.5" _orig_x="834.77">com.ibm.ja..</text>
+</g>
+<g class="">
+<title>java.lang.Thread.run(Thread.java:857) (1,754 samples, 5.55%)</title><rect x="10" y="661" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="671.5" _orig_x="13.00">java.lang.T..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.graphics.GC.win32_new(GC.java:5061) (2 samples, 0.01%)</title><rect x="1512.5" y="229" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.5" _orig_width="0.1"/>
+<text x="1515.5" y="239.5" _orig_x="1515.51"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.graphics.GC.textExtent(GC.java:4967) (2 samples, 0.01%)</title><rect x="1512.8" y="69" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.8" _orig_width="0.1"/>
+<text x="1515.8" y="79.5" _orig_x="1515.76"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.DrawText(Native Method) (2 samples, 0.01%)</title><rect x="1512.8" y="37" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.8" _orig_width="0.1"/>
+<text x="1515.8" y="47.5" _orig_x="1515.76"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,753 samples, 5.55%)</title><rect x="448.8" y="581" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="448.8" _orig_width="87.7"/>
+<text x="451.8" y="591.5" _orig_x="451.80">java.lang.O..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.sendEvent(Display.java:4274) (4 samples, 0.01%)</title><rect x="1512.7" y="181" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="191.5" _orig_x="1515.66"/>
+</g>
+<g class="">
+<title>java.util.HashMap$ValueSpliterator.forEachRemaining(HashMap.java:1779) (87 samples, 0.28%)</title><rect x="815.1" y="533" width="4.4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="815.1" _orig_width="4.4"/>
+<text x="818.1" y="543.5" _orig_x="818.11"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:635) (25 samples, 0.08%)</title><rect x="920.8" y="645" width="1.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.3"/>
+<text x="923.8" y="655.5" _orig_x="923.82"/>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection$1.next(Collections.java:1054) (2 samples, 0.01%)</title><rect x="827.6" y="549" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.6" _orig_width="0.1"/>
+<text x="830.6" y="559.5" _orig_x="830.62"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.ole.win32.OleFrame.lambda$1(OleFrame.java:168) (14 samples, 0.04%)</title><rect x="1511.2" y="261" width="0.7" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.2" _orig_width="0.7"/>
+<text x="1514.2" y="271.5" _orig_x="1514.21"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1122) (24 samples, 0.08%)</title><rect x="919.6" y="629" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="639.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Control.windowProc(Control.java:4801) (3 samples, 0.01%)</title><rect x="1512.9" y="277" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.9" _orig_width="0.2"/>
+<text x="1515.9" y="287.5" _orig_x="1515.91"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:79) (30 samples, 0.09%)</title><rect x="815.6" y="485" width="1.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="815.6" _orig_width="1.5"/>
+<text x="818.6" y="495.5" _orig_x="818.61"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:512) (66 samples, 0.21%)</title><rect x="824.1" y="517" width="3.3" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="824.1" _orig_width="3.3"/>
+<text x="827.1" y="527.5" _orig_x="827.11"/>
+</g>
+<g>
+<title>org.eclipse.mat.ui.snapshot.ParseHeapDumpJob.run(ParseHeapDumpJob.java:99) (1,064 samples, 3.37%)</title><rect x="1449" y="645" width="53.2" height="15.0" fill="rgb(255,183,0)" rx="2" ry="2" _orig_x="1449.0" _orig_width="53.2"/>
+<text x="1452" y="655.5" _orig_x="1451.97">org.e..</text>
+</g>
+<g class="">
+<title>java.util.HashMap.putVal(HashMap.java:661) (15 samples, 0.05%)</title><rect x="818.3" y="437" width="0.7" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="818.3" _orig_width="0.7"/>
+<text x="821.3" y="447.5" _orig_x="821.26"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.windowProc(Display.java:5039) (72 samples, 0.23%)</title><rect x="1512.5" y="293" width="3.6" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="1512.5" _orig_width="3.6"/>
+<text x="1515.5" y="303.5" _orig_x="1515.46"/>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection$1.next(Collections.java:1054) (2 samples, 0.01%)</title><rect x="825.1" y="421" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="825.1" _orig_width="0.1"/>
+<text x="828.1" y="431.5" _orig_x="828.11"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.memory.MemoryDataProvider.getPhysicalMemorySizeImpl(MemoryDataProvider.java:72) (9 samples, 0.03%)</title><rect x="829" y="629" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.0" _orig_width="0.4"/>
+<text x="832" y="639.5" _orig_x="831.97"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaClassLoader.processData(PHDJavaClassLoader.java:270) (5 samples, 0.02%)</title><rect x="1449.8" y="405" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.2"/>
+<text x="1452.8" y="415.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.RuntimeMXBeanImpl.getInputArguments(RuntimeMXBeanImpl.java:211) (2 samples, 0.01%)</title><rect x="822.5" y="613" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.5" _orig_width="0.1"/>
+<text x="825.5" y="623.5" _orig_x="825.51"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (3,512 samples, 11.12%)</title><rect x="1273.1" y="597" width="175.7" height="15.0" fill="rgb(255,97,0)" rx="2" ry="2" _orig_x="1273.1" _orig_width="175.7"/>
+<text x="1276.1" y="607.5" _orig_x="1276.12">java.lang.Object.wait(Ob..</text>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaRuntime.&lt;init&gt;(PHDJavaRuntime.java:111) (5 samples, 0.02%)</title><rect x="1449.8" y="437" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.2"/>
+<text x="1452.8" y="447.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>java.util.HashMap$KeyIterator.&lt;init&gt;(HashMap.java:1618) (2 samples, 0.01%)</title><rect x="825.4" y="357" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="825.4" _orig_width="0.1"/>
+<text x="828.4" y="367.5" _orig_x="828.36"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.getFocusControl(Display.java:1857) (2 samples, 0.01%)</title><rect x="1511.1" y="245" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.1" _orig_width="0.1"/>
+<text x="1514.1" y="255.5" _orig_x="1514.11"/>
+</g>
+<g class="">
+<title>java.util.Collections$2.tryAdvance(Collections.java:4853) (8 samples, 0.03%)</title><rect x="821.6" y="517" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.6" _orig_width="0.4"/>
+<text x="824.6" y="527.5" _orig_x="824.56"/>
+</g>
+<g class="">
+<title>org.eclipse.core.runtime.adaptor.EclipseStarter.run(EclipseStarter.java:271) (1,753 samples, 5.55%)</title><rect x="1502.3" y="549" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="559.5" _orig_x="1505.30">org.eclipse...</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.runTimer(Display.java:4164) (16 samples, 0.05%)</title><rect x="1510" y="277" width="0.8" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1510.0" _orig_width="0.8"/>
+<text x="1513" y="287.5" _orig_x="1513.00"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.MoveMemory(Native Method) (5 samples, 0.02%)</title><rect x="1505.9" y="277" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1505.9" _orig_width="0.2"/>
+<text x="1508.9" y="287.5" _orig_x="1508.85"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$StatelessOp.&lt;init&gt;(ReferencePipeline.java:800) (2 samples, 0.01%)</title><rect x="827.9" y="533" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.9" _orig_width="0.1"/>
+<text x="830.9" y="543.5" _orig_x="830.87"/>
+</g>
+<g class="">
+<title>java.util.Collection.stream(Collection.java:743) (3 samples, 0.01%)</title><rect x="820.5" y="613" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.5" _orig_width="0.2"/>
+<text x="823.5" y="623.5" _orig_x="823.51"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:219) (1,753 samples, 5.55%)</title><rect x="273.3" y="597" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="273.3" _orig_width="87.7"/>
+<text x="276.3" y="607.5" _orig_x="276.30">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:165) (108 samples, 0.34%)</title><rect x="624.7" y="661" width="5.4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="624.7" _orig_width="5.4"/>
+<text x="627.7" y="671.5" _orig_x="627.65"/>
+</g>
+<g class="">
+<title>com.ibm.lang.management.internal.ExtendedOperatingSystemMXBeanImpl.getTotalMemorySize(ExtendedOperatingSystemMXBeanImpl.java:177) (21 samples, 0.07%)</title><rect x="830.7" y="549" width="1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="830.7" _orig_width="1.0"/>
+<text x="833.7" y="559.5" _orig_x="833.67"/>
+</g>
+<g class="">
+<title>java.lang.ref.ReferenceQueue.remove(ReferenceQueue.java:109) (1,753 samples, 5.55%)</title><rect x="273.3" y="629" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="273.3" _orig_width="87.7"/>
+<text x="276.3" y="639.5" _orig_x="276.30">java.lang.r..</text>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:523) (4 samples, 0.01%)</title><rect x="822" y="549" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.0" _orig_width="0.2"/>
+<text x="825" y="559.5" _orig_x="824.96"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.readAndDispatch(Display.java:3657) (6 samples, 0.02%)</title><rect x="1508.9" y="325" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1508.9" _orig_width="0.3"/>
+<text x="1511.9" y="335.5" _orig_x="1511.85"/>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.LockSupport.park(LockSupport.java:341) (24 samples, 0.08%)</title><rect x="919.6" y="517" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="527.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>org.eclipse.mat.parser.index.IndexWriter$IntIndexStreamer$WriterTask.run(IndexWriter.java:1038) (2 samples, 0.01%)</title><rect x="922" y="613" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="922.0" _orig_width="0.1"/>
+<text x="925" y="623.5" _orig_x="924.97"/>
+</g>
+<g class="">
+<title>java.lang.reflect.AccessibleObject.verifyAccess(AccessibleObject.java:701) (5 samples, 0.02%)</title><rect x="829.5" y="581" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.5" _orig_width="0.3"/>
+<text x="832.5" y="591.5" _orig_x="832.52"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3436) (22 samples, 0.07%)</title><rect x="920.8" y="565" width="1.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.1"/>
+<text x="923.8" y="575.5" _orig_x="923.82"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.DominatorTree$Calculator$FlatDominatorTree.&lt;init&gt;(DominatorTree.java:445) (2 samples, 0.01%)</title><rect x="1502" y="533" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1502.0" _orig_width="0.1"/>
+<text x="1505" y="543.5" _orig_x="1505.00"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.ui.internal.workbench.swt.PartRenderingEngine$5.run(PartRenderingEngine.java:1152) (8 samples, 0.03%)</title><rect x="1516.5" y="341" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.5" _orig_width="0.4"/>
+<text x="1519.5" y="351.5" _orig_x="1519.46"/>
+</g>
+<g class="">
+<title>jdk.internal.reflect.Reflection.verifyModuleAccess(Reflection.java:244) (2 samples, 0.01%)</title><rect x="829.7" y="533" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.7" _orig_width="0.1"/>
+<text x="832.7" y="543.5" _orig_x="832.67"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:80) (43 samples, 0.14%)</title><rect x="817.1" y="485" width="2.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="817.1" _orig_width="2.2"/>
+<text x="820.1" y="495.5" _orig_x="820.11"/>
+</g>
+<g class="">
+<title>java.util.HashMap$HashIterator.nextNode(HashMap.java:1601) (2 samples, 0.01%)</title><rect x="827.6" y="517" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.6" _orig_width="0.1"/>
+<text x="830.6" y="527.5" _orig_x="830.62"/>
+</g>
+<g class="">
+<title>java.util.concurrent.SynchronousQueue.take(SynchronousQueue.java:886) (24 samples, 0.08%)</title><rect x="919.6" y="597" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="607.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.memory.MemoryDataProvider.getPhysicalMemorySizeImpl(MemoryDataProvider.java:70) (117 samples, 0.37%)</title><rect x="823.1" y="629" width="5.9" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="823.1" _orig_width="5.9"/>
+<text x="826.1" y="639.5" _orig_x="826.11"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDImage.&lt;init&gt;(PHDImage.java:89) (9 samples, 0.03%)</title><rect x="1449.8" y="485" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.4"/>
+<text x="1452.8" y="495.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>org.eclipse.emf.common.util.CommonUtil$1ReferenceClearingQueuePollingThread.run(CommonUtil.java:80) (1,753 samples, 5.55%)</title><rect x="448.8" y="661" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="448.8" _orig_width="87.7"/>
+<text x="451.8" y="671.5" _orig_x="451.80">org.eclips..</text>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory$PlatformMBeanFinder.findSingleton(ManagementFactory.java:992) (107 samples, 0.34%)</title><rect x="814.4" y="629" width="5.4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="814.4" _orig_width="5.4"/>
+<text x="817.4" y="639.5" _orig_x="817.41"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.&lt;init&gt;(AbstractPipeline.java:216) (3 samples, 0.01%)</title><rect x="820.7" y="549" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.7" _orig_width="0.2"/>
+<text x="823.7" y="559.5" _orig_x="823.71"/>
+</g>
+<g class="">
+<title>com.ibm.lang.management.internal.ExtendedOperatingSystemMXBeanImpl.getTotalPhysicalMemoryImpl(Native Method) (21 samples, 0.07%)</title><rect x="830.7" y="533" width="1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="830.7" _orig_width="1.0"/>
+<text x="833.7" y="543.5" _orig_x="833.67"/>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection$1.&lt;init&gt;(Collections.java:1051) (5 samples, 0.02%)</title><rect x="825.2" y="405" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="825.2" _orig_width="0.3"/>
+<text x="828.2" y="415.5" _orig_x="828.21"/>
+</g>
+<g class="">
+<title>java.lang.Class.lookupCachedMethod(Class.java:4221) (4 samples, 0.01%)</title><rect x="829.2" y="581" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.2" _orig_width="0.2"/>
+<text x="832.2" y="591.5" _orig_x="832.22"/>
+</g>
+<g class="">
+<title>java.lang.Class.getMethodHelper(Class.java:1499) (6 samples, 0.02%)</title><rect x="829.1" y="597" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.1" _orig_width="0.3"/>
+<text x="832.1" y="607.5" _orig_x="832.12"/>
+</g>
+<g class="">
+<title>Start Level: Equinox Container: UUID (1,754 samples, 5.55%)</title><rect x="1097.7" y="677" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1097.7" _orig_width="87.7"/>
+<text x="1100.7" y="687.5" _orig_x="1100.67">Start Level..</text>
+</g>
+<g class="">
+<title>org.eclipse.core.runtime.adaptor.EclipseStarter.run(EclipseStarter.java:267) (2 samples, 0.01%)</title><rect x="1502.2" y="549" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1502.2" _orig_width="0.1"/>
+<text x="1505.2" y="559.5" _orig_x="1505.20"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ThreadMXBeanImpl.getMultiThreadInfoImpl(Native Method) (1,755 samples, 5.56%)</title><rect x="831.8" y="597" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="831.8" _orig_width="87.8"/>
+<text x="834.8" y="607.5" _orig_x="834.77">com.ibm.ja..</text>
+</g>
+<g class="">
+<title>java.util.Collection.stream(Collection.java:743) (4 samples, 0.01%)</title><rect x="823.7" y="565" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.7" _orig_width="0.2"/>
+<text x="826.7" y="575.5" _orig_x="826.66"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:635) (25 samples, 0.08%)</title><rect x="919.6" y="645" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="655.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>java.util.HashMap.hash(HashMap.java:338) (2 samples, 0.01%)</title><rect x="1512.4" y="229" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.4" _orig_width="0.1"/>
+<text x="1515.4" y="239.5" _orig_x="1515.36"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:179) (3 samples, 0.01%)</title><rect x="819.3" y="517" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="819.3" _orig_width="0.2"/>
+<text x="822.3" y="527.5" _orig_x="822.31"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.core.internal.contexts.EclipseContext.processWaiting(EclipseContext.java:543) (3 samples, 0.01%)</title><rect x="1516.7" y="325" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.7" _orig_width="0.2"/>
+<text x="1519.7" y="335.5" _orig_x="1519.71"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1122) (8 samples, 0.03%)</title><rect x="536.5" y="629" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="536.5" _orig_width="0.4"/>
+<text x="539.5" y="639.5" _orig_x="539.50"/>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.run(EventManager.java:337) (1,751 samples, 5.54%)</title><rect x="536.9" y="661" width="87.6" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="536.9" _orig_width="87.6"/>
+<text x="539.9" y="671.5" _orig_x="539.90">org.eclipse...</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Widget.sendEvent(Widget.java:1090) (4 samples, 0.01%)</title><rect x="1512.7" y="213" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="223.5" _orig_x="1515.66"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.snapshot.ObjectMarker.markMultiThreaded(ObjectMarker.java:163) (8 samples, 0.03%)</title><rect x="1474.8" y="533" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.8" _orig_width="0.4"/>
+<text x="1477.8" y="543.5" _orig_x="1477.78"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory$PlatformMBeanFinder.findSingleton(ManagementFactory.java:992) (72 samples, 0.23%)</title><rect x="823.9" y="581" width="3.6" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="823.9" _orig_width="3.6"/>
+<text x="826.9" y="591.5" _orig_x="826.86"/>
+</g>
+<g class="">
+<title>jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method) (1,755 samples, 5.56%)</title><rect x="1502.2" y="565" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.2" _orig_width="87.8"/>
+<text x="1505.2" y="575.5" _orig_x="1505.20">jdk.interna..</text>
+</g>
+<g class="">
+<title>jdk.internal.misc.InnocuousThread.run(InnocuousThread.java:162) (1,755 samples, 5.56%)</title><rect x="361" y="661" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="361.0" _orig_width="87.8"/>
+<text x="364" y="671.5" _orig_x="364.00">jdk.interna..</text>
+</g>
+<g class="">
+<title>java.util.HashMap$KeySet.iterator(HashMap.java:983) (2 samples, 0.01%)</title><rect x="817" y="421" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="817.0" _orig_width="0.1"/>
+<text x="820" y="431.5" _orig_x="820.01"/>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.progress.ProgressManager.lambda$7(ProgressManager.java:387) (2 samples, 0.01%)</title><rect x="1516.3" y="165" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="175.5" _orig_x="1519.31"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.index.IndexWriter$IntIndex.get(IndexWriter.java:481) (2 samples, 0.01%)</title><rect x="1501.3" y="549" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.3" _orig_width="0.1"/>
+<text x="1504.3" y="559.5" _orig_x="1504.35"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.core.internal.contexts.ConcurrentNeutralValueMap.get(ConcurrentNeutralValueMap.java:53) (2 samples, 0.01%)</title><rect x="1516.8" y="277" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.8" _orig_width="0.1"/>
+<text x="1519.8" y="287.5" _orig_x="1519.76"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1062) (1,753 samples, 5.55%)</title><rect x="717.8" y="613" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="623.5" _orig_x="720.80">java.util.c..</text>
+</g>
+<g class="">
+<title>sun.management.spi.PlatformMBeanProvider$PlatformComponent.getMBeans(PlatformMBeanProvider.java:192) (5 samples, 0.02%)</title><rect x="827.6" y="581" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.6" _orig_width="0.2"/>
+<text x="830.6" y="591.5" _orig_x="830.57"/>
+</g>
+<g class="">
+<title>openj9.internal.tools.attach.target.WaitLoop.waitForNotification(WaitLoop.java:66) (1,755 samples, 5.56%)</title><rect x="97.7" y="645" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="97.7" _orig_width="87.8"/>
+<text x="100.7" y="655.5" _orig_x="100.75">openj9.int..</text>
+</g>
+<g class="">
+<title>java.util.HashSet.iterator(HashSet.java:174) (2 samples, 0.01%)</title><rect x="825.4" y="389" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="825.4" _orig_width="0.1"/>
+<text x="828.4" y="399.5" _orig_x="828.36"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,755 samples, 5.56%)</title><rect x="361" y="565" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="361.0" _orig_width="87.8"/>
+<text x="364" y="575.5" _orig_x="364.00">java.lang.O..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.ProgressBar.callWindowProc(ProgressBar.java:113) (58 samples, 0.18%)</title><rect x="1513.2" y="261" width="2.9" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1513.2" _orig_width="2.9"/>
+<text x="1516.2" y="271.5" _orig_x="1516.16"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$3.&lt;init&gt;(ReferencePipeline.java:191) (3 samples, 0.01%)</title><rect x="820.7" y="597" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.7" _orig_width="0.2"/>
+<text x="823.7" y="607.5" _orig_x="823.71"/>
+</g>
+<g>
+<title>org.eclipse.core.internal.jobs.Worker.run(Worker.java:63) (1,065 samples, 3.37%)</title><rect x="1448.9" y="661" width="53.3" height="15.0" fill="rgb(255,183,0)" rx="2" ry="2" _orig_x="1448.9" _orig_width="53.3"/>
+<text x="1451.9" y="671.5" _orig_x="1451.92">org.ec..</text>
+</g>
+<g class="">
+<title>java.util.HashMap.putVal(HashMap.java:661) (9 samples, 0.03%)</title><rect x="826.5" y="389" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="826.5" _orig_width="0.4"/>
+<text x="829.5" y="399.5" _orig_x="829.47"/>
+</g>
+<g class="">
+<title>jdk.internal.misc.Unsafe.park(Native Method) (22 samples, 0.07%)</title><rect x="920.8" y="501" width="1.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.1"/>
+<text x="923.8" y="511.5" _orig_x="923.82"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory.getPlatformMXBean(ManagementFactory.java:687) (53 samples, 0.17%)</title><rect x="819.8" y="645" width="2.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="819.8" _orig_width="2.6"/>
+<text x="822.8" y="655.5" _orig_x="822.76"/>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.progress.ProgressManager.lambda$6(ProgressManager.java:387) (2 samples, 0.01%)</title><rect x="1516.3" y="197" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="207.5" _orig_x="1519.31"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory.getOperatingSystemMXBean(ManagementFactory.java:389) (114 samples, 0.36%)</title><rect x="823.3" y="613" width="5.7" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="823.3" _orig_width="5.7"/>
+<text x="826.3" y="623.5" _orig_x="826.26"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.GetFocus(Native Method) (2 samples, 0.01%)</title><rect x="1511.1" y="213" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.1" _orig_width="0.1"/>
+<text x="1514.1" y="223.5" _orig_x="1514.11"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDImageProcess.&lt;init&gt;(PHDImageProcess.java:82) (9 samples, 0.03%)</title><rect x="1449.8" y="453" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.4"/>
+<text x="1452.8" y="463.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.TranslateMessage(Native Method) (6 samples, 0.02%)</title><rect x="1508.9" y="309" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1508.9" _orig_width="0.3"/>
+<text x="1511.9" y="319.5" _orig_x="1511.85"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:635) (1,754 samples, 5.55%)</title><rect x="10" y="645" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="655.5" _orig_x="13.00">java.util.c..</text>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,754 samples, 5.55%)</title><rect x="185.5" y="597" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="185.5" _orig_width="87.8"/>
+<text x="188.5" y="607.5" _orig_x="188.55">java.lang.O..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Control.windowProc(Control.java:4845) (59 samples, 0.19%)</title><rect x="1513.1" y="277" width="3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1513.1" _orig_width="3.0"/>
+<text x="1516.1" y="287.5" _orig_x="1516.11"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.sleep(Display.java:4771) (2 samples, 0.01%)</title><rect x="1589.9" y="293" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1589.9" _orig_width="0.1"/>
+<text x="1592.9" y="303.5" _orig_x="1592.90"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory$PlatformMBeanFinder.findSingleton(ManagementFactory.java:990) (2 samples, 0.01%)</title><rect x="814.3" y="629" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="814.3" _orig_width="0.1"/>
+<text x="817.3" y="639.5" _orig_x="817.31"/>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder.processHeapObject(DTFJIndexBuilder.java:4038) (2 samples, 0.01%)</title><rect x="1449.3" y="565" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.3" _orig_width="0.1"/>
+<text x="1452.3" y="575.5" _orig_x="1452.27"/>
+</g>
+<g class="">
+<title>java.util.HashSet.add(HashSet.java:221) (3 samples, 0.01%)</title><rect x="820.3" y="597" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.3" _orig_width="0.1"/>
+<text x="823.3" y="607.5" _orig_x="823.26"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.ole.win32.OleFrame.lambda$1(OleFrame.java:151) (5 samples, 0.02%)</title><rect x="1510.9" y="261" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1510.9" _orig_width="0.2"/>
+<text x="1513.9" y="271.5" _orig_x="1513.85"/>
+</g>
+<g class="">
+<title>org.eclipse.core.internal.jobs.WorkerPool.sleep(WorkerPool.java:200) (2 samples, 0.01%)</title><rect x="1448.8" y="629" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1448.8" _orig_width="0.1"/>
+<text x="1451.8" y="639.5" _orig_x="1451.82"/>
+</g>
+<g class="">
+<title>java.lang.Thread.run(Thread.java:857) (1,753 samples, 5.55%)</title><rect x="273.3" y="661" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="273.3" _orig_width="87.7"/>
+<text x="276.3" y="671.5" _orig_x="276.30">java.lang.T..</text>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.progress.ProgressManagerUtil.shortenText(ProgressManagerUtil.java:164) (3 samples, 0.01%)</title><rect x="1512.7" y="101" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="111.5" _orig_x="1515.71"/>
+</g>
+<g class="">
+<title>java.lang.reflect.ReflectAccess.getExecutableSharedParameterTypes(ReflectAccess.java:94) (4 samples, 0.01%)</title><rect x="829.2" y="533" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.2" _orig_width="0.2"/>
+<text x="832.2" y="543.5" _orig_x="832.22"/>
+</g>
+<g class="">
+<title>java.lang.ref.ReferenceQueue.remove(ReferenceQueue.java:137) (1,753 samples, 5.55%)</title><rect x="273.3" y="613" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="273.3" _orig_width="87.7"/>
+<text x="276.3" y="623.5" _orig_x="276.30">java.lang.r..</text>
+</g>
+<g>
+<title>org.eclipse.mat.parser.index.IndexWriter$InboundWriter.flush(IndexWriter.java:1478) (5 samples, 0.02%)</title><rect x="1501.5" y="565" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.5" _orig_width="0.3"/>
+<text x="1504.5" y="575.5" _orig_x="1504.55"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Synchronizer.runAsyncMessages(Synchronizer.java:132) (5 samples, 0.02%)</title><rect x="1516.2" y="293" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.2" _orig_width="0.3"/>
+<text x="1519.2" y="303.5" _orig_x="1519.21"/>
+</g>
+<g class="">
+<title>java.util.stream.ReduceOps$ReduceOp.evaluateSequential(ReduceOps.java:921) (69 samples, 0.22%)</title><rect x="824" y="533" width="3.5" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="824.0" _orig_width="3.5"/>
+<text x="827" y="543.5" _orig_x="827.01"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.sleep(Display.java:4770) (1,457 samples, 4.61%)</title><rect x="1517" y="293" width="72.9" height="15.0" fill="rgb(255,177,0)" rx="2" ry="2" _orig_x="1517.0" _orig_width="72.9"/>
+<text x="1520" y="303.5" _orig_x="1520.01">org.eclip..</text>
+</g>
+<g class="">
+<title>java.util.stream.StreamSupport.stream(StreamSupport.java:70) (4 samples, 0.01%)</title><rect x="823.7" y="549" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.7" _orig_width="0.2"/>
+<text x="826.7" y="559.5" _orig_x="826.66"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,753 samples, 5.55%)</title><rect x="273.3" y="581" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="273.3" _orig_width="87.7"/>
+<text x="276.3" y="591.5" _orig_x="276.30">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.HashMap$KeyIterator.next(HashMap.java:1620) (4 samples, 0.01%)</title><rect x="816.8" y="453" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="816.8" _orig_width="0.2"/>
+<text x="819.8" y="463.5" _orig_x="819.81"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.SnapshotFactoryImpl.parse(SnapshotFactoryImpl.java:466) (1,032 samples, 3.27%)</title><rect x="1450.2" y="597" width="51.6" height="15.0" fill="rgb(255,183,0)" rx="2" ry="2" _orig_x="1450.2" _orig_width="51.6"/>
+<text x="1453.2" y="607.5" _orig_x="1453.22">org.e..</text>
+</g>
+<g class="">
+<title>Health Center (cpu) (340 samples, 1.08%)</title><rect x="805.5" y="677" width="17" height="15.0" fill="rgb(255,194,0)" rx="2" ry="2" _orig_x="805.5" _orig_width="17.0"/>
+<text x="808.5" y="687.5" _orig_x="808.50"/>
+</g>
+<g class="">
+<title>Active Thread: Equinox Container: UUID (1,754 samples, 5.55%)</title><rect x="10" y="677" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="687.5" _orig_x="13.00">Active Thre..</text>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline.map(ReferencePipeline.java:190) (2 samples, 0.01%)</title><rect x="827.9" y="565" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.9" _orig_width="0.1"/>
+<text x="830.9" y="575.5" _orig_x="830.87"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,754 samples, 5.55%)</title><rect x="922.2" y="597" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="922.2" _orig_width="87.7"/>
+<text x="925.2" y="607.5" _orig_x="925.17">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.HashMap$ValueSpliterator.forEachRemaining(HashMap.java:1779) (56 samples, 0.18%)</title><rect x="824.3" y="485" width="2.8" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="824.3" _orig_width="2.8"/>
+<text x="827.3" y="495.5" _orig_x="827.26"/>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.getNextEvent(EventManager.java:396) (1,751 samples, 5.54%)</title><rect x="536.9" y="645" width="87.6" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="536.9" _orig_width="87.6"/>
+<text x="539.9" y="655.5" _orig_x="539.90">org.eclipse...</text>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.environment.EnvironmentDataProvider.populateProperties(EnvironmentDataProvider.java:78) (2 samples, 0.01%)</title><rect x="822.5" y="645" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.5" _orig_width="0.1"/>
+<text x="825.5" y="655.5" _orig_x="825.51"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:79) (4 samples, 0.01%)</title><rect x="820.1" y="613" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.1" _orig_width="0.2"/>
+<text x="823.1" y="623.5" _orig_x="823.06"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.DispatchMessage(Native Method) (138 samples, 0.44%)</title><rect x="1509.2" y="309" width="6.9" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="1509.2" _orig_width="6.9"/>
+<text x="1512.2" y="319.5" _orig_x="1512.15"/>
+</g>
+<g class="">
+<title>java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435) (1,753 samples, 5.55%)</title><rect x="717.8" y="597" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="607.5" _orig_x="720.80">java.util.c..</text>
+</g>
+<g class="">
+<title>java.lang.System.getProperty(System.java:604) (2 samples, 0.01%)</title><rect x="823" y="613" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.0" _orig_width="0.1"/>
+<text x="826" y="623.5" _orig_x="826.01"/>
+</g>
+<g class="">
+<title>java.lang.Class.getParameterTypes(Class.java:4091) (4 samples, 0.01%)</title><rect x="829.2" y="565" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.2" _orig_width="0.2"/>
+<text x="832.2" y="575.5" _orig_x="832.22"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline.map(ReferencePipeline.java:190) (3 samples, 0.01%)</title><rect x="820.7" y="613" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.7" _orig_width="0.2"/>
+<text x="823.7" y="623.5" _orig_x="823.71"/>
+</g>
+<g class="">
+<title>java.util.HashMap$KeyIterator.next(HashMap.java:1620) (2 samples, 0.01%)</title><rect x="827.6" y="533" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.6" _orig_width="0.1"/>
+<text x="830.6" y="543.5" _orig_x="830.62"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3465) (24 samples, 0.08%)</title><rect x="919.6" y="549" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="559.5" _orig_x="922.57"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:190) (1,754 samples, 5.55%)</title><rect x="185.5" y="629" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="185.5" _orig_width="87.8"/>
+<text x="188.5" y="639.5" _orig_x="188.55">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.concurrent.ConcurrentHashMap.get(ConcurrentHashMap.java:941) (2 samples, 0.01%)</title><rect x="823" y="549" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="823.0" _orig_width="0.1"/>
+<text x="826" y="559.5" _orig_x="826.01"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (3,512 samples, 11.12%)</title><rect x="1273.1" y="581" width="175.7" height="15.0" fill="rgb(255,97,0)" rx="2" ry="2" _orig_x="1273.1" _orig_width="175.7"/>
+<text x="1276.1" y="591.5" _orig_x="1276.12">java.lang.Object.waitImpl..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.PeekMessage(Native Method) (129 samples, 0.41%)</title><rect x="1502.4" y="309" width="6.5" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="1502.4" _orig_width="6.5"/>
+<text x="1505.4" y="319.5" _orig_x="1505.40"/>
+</g>
+<g class="">
+<title>Attach API wait loop (1,755 samples, 5.56%)</title><rect x="97.7" y="677" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="97.7" _orig_width="87.8"/>
+<text x="100.7" y="687.5" _orig_x="100.75">Attach API..</text>
+</g>
+<g class="">
+<title>java.util.stream.Sink$ChainedReference.end(Sink.java:258) (4 samples, 0.01%)</title><rect x="822" y="533" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.0" _orig_width="0.2"/>
+<text x="825" y="543.5" _orig_x="824.96"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.sendPostExternalEventDispatchEvent(Display.java:4311) (2 samples, 0.01%)</title><rect x="1589.9" y="277" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1589.9" _orig_width="0.1"/>
+<text x="1592.9" y="287.5" _orig_x="1592.90"/>
+</g>
+<g class="">
+<title>java.util.HashMap.resize(HashMap.java:705) (5 samples, 0.02%)</title><rect x="826.5" y="373" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="826.5" _orig_width="0.3"/>
+<text x="829.5" y="383.5" _orig_x="829.52"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Synchronizer.removeFirst(Synchronizer.java:115) (3 samples, 0.01%)</title><rect x="1516.1" y="277" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.1" _orig_width="0.1"/>
+<text x="1519.1" y="287.5" _orig_x="1519.06"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.wrapSink(AbstractPipeline.java:560) (4 samples, 0.01%)</title><rect x="827.2" y="501" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.2" _orig_width="0.2"/>
+<text x="830.2" y="511.5" _orig_x="830.22"/>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection.iterator(Collections.java:1050) (2 samples, 0.01%)</title><rect x="817" y="469" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="817.0" _orig_width="0.1"/>
+<text x="820" y="479.5" _orig_x="820.01"/>
+</g>
+<g class="">
+<title>java.util.Collections$2.forEachRemaining(Collections.java:4861) (10 samples, 0.03%)</title><rect x="828.1" y="485" width="0.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.1" _orig_width="0.5"/>
+<text x="831.1" y="495.5" _orig_x="831.12"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1122) (1,753 samples, 5.55%)</title><rect x="717.8" y="629" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="639.5" _orig_x="720.80">java.util.c..</text>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.threads.ThreadDataProvider.getThreadReport(ThreadDataProvider.java:74) (1,755 samples, 5.56%)</title><rect x="831.8" y="645" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="831.8" _orig_width="87.8"/>
+<text x="834.8" y="655.5" _orig_x="834.77">com.ibm.j..</text>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection$1.hasNext(Collections.java:1053) (2 samples, 0.01%)</title><rect x="825" y="421" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="825.0" _orig_width="0.1"/>
+<text x="828" y="431.5" _orig_x="828.01"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (1,751 samples, 5.54%)</title><rect x="536.9" y="597" width="87.6" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="536.9" _orig_width="87.6"/>
+<text x="539.9" y="607.5" _orig_x="539.90">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,753 samples, 5.55%)</title><rect x="1185.4" y="629" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1185.4" _orig_width="87.7"/>
+<text x="1188.4" y="639.5" _orig_x="1188.42">java.lang.O..</text>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:80) (3 samples, 0.01%)</title><rect x="820.3" y="613" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.3" _orig_width="0.1"/>
+<text x="823.3" y="623.5" _orig_x="823.26"/>
+</g>
+<g class="">
+<title>openj9.internal.tools.attach.target.IPC.waitSemaphore(Native Method) (1,755 samples, 5.56%)</title><rect x="97.7" y="613" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="97.7" _orig_width="87.8"/>
+<text x="100.7" y="623.5" _orig_x="100.75">openj9.inte..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.runAsyncMessages(Display.java:4047) (8 samples, 0.03%)</title><rect x="1516.1" y="309" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.1" _orig_width="0.4"/>
+<text x="1519.1" y="319.5" _orig_x="1519.06"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:512) (97 samples, 0.31%)</title><rect x="814.9" y="565" width="4.9" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="814.9" _orig_width="4.9"/>
+<text x="817.9" y="575.5" _orig_x="817.91"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (2 samples, 0.01%)</title><rect x="1448.8" y="597" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1448.8" _orig_width="0.1"/>
+<text x="1451.8" y="607.5" _orig_x="1451.82"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:190) (1,754 samples, 5.55%)</title><rect x="1009.9" y="629" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1009.9" _orig_width="87.8"/>
+<text x="1012.9" y="639.5" _orig_x="1012.92">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory.getPlatformMXBean(ManagementFactory.java:689) (2 samples, 0.01%)</title><rect x="822.4" y="645" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.4" _orig_width="0.1"/>
+<text x="825.4" y="655.5" _orig_x="825.41"/>
+</g>
+<g class="">
+<title>jdk.internal.reflect.GeneratedMethodAccessor29.invoke() (25 samples, 0.08%)</title><rect x="830.5" y="581" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="830.5" _orig_width="1.2"/>
+<text x="833.5" y="591.5" _orig_x="833.47"/>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:506) (1,753 samples, 5.55%)</title><rect x="717.8" y="533" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="543.5" _orig_x="720.80">java.util.c..</text>
+</g>
+<g class="">
+<title>org.eclipse.e4.ui.internal.workbench.swt.PartRenderingEngine.run(PartRenderingEngine.java:1042) (1,753 samples, 5.55%)</title><rect x="1502.3" y="373" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="383.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaClassLoader.setArrayType(PHDJavaClassLoader.java:327) (4 samples, 0.01%)</title><rect x="1450" y="405" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1450.0" _orig_width="0.2"/>
+<text x="1453" y="415.5" _orig_x="1453.02"/>
+</g>
+<g class="">
+<title>openj9.internal.tools.attach.target.WaitLoop.run(WaitLoop.java:157) (1,755 samples, 5.56%)</title><rect x="97.7" y="661" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="97.7" _orig_width="87.8"/>
+<text x="100.7" y="671.5" _orig_x="100.75">openj9.inte..</text>
+</g>
+<g class="">
+<title>java.util.stream.ReduceOps$ReduceOp.evaluateSequential(ReduceOps.java:921) (16 samples, 0.05%)</title><rect x="828" y="533" width="0.8" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.0" _orig_width="0.8"/>
+<text x="831" y="543.5" _orig_x="831.02"/>
+</g>
+<g class="">
+<title>java.lang.Thread.run(Thread.java:857) (1,754 samples, 5.55%)</title><rect x="1009.9" y="661" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1009.9" _orig_width="87.8"/>
+<text x="1012.9" y="671.5" _orig_x="1012.92">java.lang.T..</text>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:251) (1,754 samples, 5.55%)</title><rect x="630.1" y="613" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="630.1" _orig_width="87.7"/>
+<text x="633.1" y="623.5" _orig_x="633.05">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.lang.reflect.Method.invoke(Method.java:566) (5 samples, 0.02%)</title><rect x="829.5" y="613" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.5" _orig_width="0.3"/>
+<text x="832.5" y="623.5" _orig_x="832.52"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:179) (8 samples, 0.03%)</title><rect x="821.6" y="501" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.6" _orig_width="0.4"/>
+<text x="824.6" y="511.5" _orig_x="824.56"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1136) (3 samples, 0.01%)</title><rect x="921.9" y="629" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="921.9" _orig_width="0.2"/>
+<text x="924.9" y="639.5" _orig_x="924.92"/>
+</g>
+<g class="">
+<title>java.lang.Object.waitImpl(Native Method) (2 samples, 0.01%)</title><rect x="1448.8" y="581" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1448.8" _orig_width="0.1"/>
+<text x="1451.8" y="591.5" _orig_x="1451.82"/>
+</g>
+<g class="">
+<title>Framework Event Dispatcher: Equinox Container: UUID (1,754 samples, 5.55%)</title><rect x="630.1" y="677" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="630.1" _orig_width="87.7"/>
+<text x="633.1" y="687.5" _orig_x="633.05">Framework..</text>
+</g>
+<g class="">
+<title>java.util.HashMap.putVal(HashMap.java:627) (3 samples, 0.01%)</title><rect x="818.1" y="437" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="818.1" _orig_width="0.1"/>
+<text x="821.1" y="447.5" _orig_x="821.06"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaRuntime.&lt;init&gt;(PHDJavaRuntime.java:113) (4 samples, 0.01%)</title><rect x="1450" y="437" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1450.0" _orig_width="0.2"/>
+<text x="1453" y="447.5" _orig_x="1453.02"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.GetFocus(Native Method) (2 samples, 0.01%)</title><rect x="1511" y="213" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.0" _orig_width="0.1"/>
+<text x="1514" y="223.5" _orig_x="1514.01"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.SnapshotFactoryImpl.openSnapshot(SnapshotFactoryImpl.java:224) (1,064 samples, 3.37%)</title><rect x="1449" y="613" width="53.2" height="15.0" fill="rgb(255,183,0)" rx="2" ry="2" _orig_x="1449.0" _orig_width="53.2"/>
+<text x="1452" y="623.5" _orig_x="1451.97">org.e..</text>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.&lt;init&gt;(AbstractPipeline.java:216) (2 samples, 0.01%)</title><rect x="827.9" y="501" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.9" _orig_width="0.1"/>
+<text x="830.9" y="511.5" _orig_x="830.87"/>
+</g>
+<g>
+<title>java.util.ArrayList.forEach(ArrayList.java:1511) (8 samples, 0.03%)</title><rect x="1474.8" y="517" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.8" _orig_width="0.4"/>
+<text x="1477.8" y="527.5" _orig_x="1477.78"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Control.internal_new_GC(Control.java:1773) (2 samples, 0.01%)</title><rect x="1512.5" y="213" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.5" _orig_width="0.1"/>
+<text x="1515.5" y="223.5" _orig_x="1515.51"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.WaitMessage(Native Method) (1,457 samples, 4.61%)</title><rect x="1517" y="277" width="72.9" height="15.0" fill="rgb(255,177,0)" rx="2" ry="2" _orig_x="1517.0" _orig_width="72.9"/>
+<text x="1520" y="287.5" _orig_x="1520.01">org.eclip..</text>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:79) (2 samples, 0.01%)</title><rect x="827.6" y="565" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.6" _orig_width="0.1"/>
+<text x="830.6" y="575.5" _orig_x="830.62"/>
+</g>
+<g class="">
+<title>java.util.Collections$UnmodifiableCollection$1.&lt;init&gt;(Collections.java:1051) (2 samples, 0.01%)</title><rect x="817" y="453" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="817.0" _orig_width="0.1"/>
+<text x="820" y="463.5" _orig_x="820.01"/>
+</g>
+<g class="">
+<title>java.util.HashMap$KeyIterator.&lt;init&gt;(HashMap.java:1618) (2 samples, 0.01%)</title><rect x="817" y="405" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="817.0" _orig_width="0.1"/>
+<text x="820" y="415.5" _orig_x="820.01"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:512) (16 samples, 0.05%)</title><rect x="828" y="517" width="0.8" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.0" _orig_width="0.8"/>
+<text x="831" y="527.5" _orig_x="831.02"/>
+</g>
+<g class="">
+<title>java.util.concurrent.LinkedBlockingQueue.poll(LinkedBlockingQueue.java:460) (8 samples, 0.03%)</title><rect x="536.5" y="597" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="536.5" _orig_width="0.4"/>
+<text x="539.5" y="607.5" _orig_x="539.50"/>
+</g>
+<g>
+<title>java.util.concurrent.ForkJoinTask.awaitDone(ForkJoinTask.java:468) (8 samples, 0.03%)</title><rect x="1474.8" y="485" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.8" _orig_width="0.4"/>
+<text x="1477.8" y="495.5" _orig_x="1477.78"/>
+</g>
+<g class="">
+<title>jdk.internal.ref.CleanerImpl.run(CleanerImpl.java:140) (1,755 samples, 5.56%)</title><rect x="361" y="629" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="361.0" _orig_width="87.8"/>
+<text x="364" y="639.5" _orig_x="364.00">jdk.interna..</text>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDImageFactory.getImage(PHDImageFactory.java:113) (9 samples, 0.03%)</title><rect x="1449.8" y="517" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.4"/>
+<text x="1452.8" y="527.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:239) (107 samples, 0.34%)</title><rect x="814.4" y="597" width="5.4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="814.4" _orig_width="5.4"/>
+<text x="817.4" y="607.5" _orig_x="817.41"/>
+</g>
+<g class="">
+<title>jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77) (1,755 samples, 5.56%)</title><rect x="1502.2" y="581" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.2" _orig_width="87.8"/>
+<text x="1505.2" y="591.5" _orig_x="1505.20">jdk.interna..</text>
+</g>
+<g>
+<title>java.util.concurrent.locks.LockSupport.park(LockSupport.java:341) (8 samples, 0.03%)</title><rect x="1474.8" y="469" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.8" _orig_width="0.4"/>
+<text x="1477.8" y="479.5" _orig_x="1477.78"/>
+</g>
+<g class="">
+<title>java.util.HashMap.putVal(HashMap.java:663) (5 samples, 0.02%)</title><rect x="819" y="437" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="819.0" _orig_width="0.3"/>
+<text x="822" y="447.5" _orig_x="822.01"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.wrapSink(AbstractPipeline.java:560) (4 samples, 0.01%)</title><rect x="819.6" y="549" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="819.6" _orig_width="0.2"/>
+<text x="822.6" y="559.5" _orig_x="822.56"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory$PlatformMBeanFinder.findSingleton(ManagementFactory.java:1006) (2 samples, 0.01%)</title><rect x="814.2" y="629" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="814.2" _orig_width="0.1"/>
+<text x="817.2" y="639.5" _orig_x="817.21"/>
+</g>
+<g class="">
+<title>java.util.HashMap$HashIterator.&lt;init&gt;(HashMap.java:1585) (2 samples, 0.01%)</title><rect x="825.4" y="341" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="825.4" _orig_width="0.1"/>
+<text x="828.4" y="351.5" _orig_x="828.36"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display._getFocusControl(Display.java:581) (2 samples, 0.01%)</title><rect x="1511.1" y="229" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.1" _orig_width="0.1"/>
+<text x="1514.1" y="239.5" _orig_x="1514.11"/>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.LockSupport.park(LockSupport.java:341) (22 samples, 0.07%)</title><rect x="920.8" y="517" width="1.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="920.8" _orig_width="1.1"/>
+<text x="923.8" y="527.5" _orig_x="923.82"/>
+</g>
+<g class="">
+<title>java.util.Spliterator.getExactSizeIfKnown(Spliterator.java:414) (4 samples, 0.01%)</title><rect x="821.1" y="533" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.1" _orig_width="0.2"/>
+<text x="824.1" y="543.5" _orig_x="824.11"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.ui.internal.workbench.E4Workbench.createAndRunUI(E4Workbench.java:152) (1,753 samples, 5.55%)</title><rect x="1502.3" y="389" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="399.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:219) (1,755 samples, 5.56%)</title><rect x="361" y="597" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="361.0" _orig_width="87.8"/>
+<text x="364" y="607.5" _orig_x="364.00">java.lang.O..</text>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:521) (3 samples, 0.01%)</title><rect x="814.9" y="549" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="814.9" _orig_width="0.2"/>
+<text x="817.9" y="559.5" _orig_x="817.91"/>
+</g>
+<g class="">
+<title>java.lang.ref.ReferenceQueue.remove(ReferenceQueue.java:137) (1,753 samples, 5.55%)</title><rect x="448.8" y="629" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="448.8" _orig_width="87.7"/>
+<text x="451.8" y="639.5" _orig_x="451.80">java.lang.r..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Composite.WM_PAINT(Composite.java:1627) (4 samples, 0.01%)</title><rect x="1512.7" y="245" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="255.5" _orig_x="1515.66"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ForkJoinPool.runWorker(ForkJoinPool.java:1623) (108 samples, 0.34%)</title><rect x="624.7" y="645" width="5.4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="624.7" _orig_width="5.4"/>
+<text x="627.7" y="655.5" _orig_x="627.65"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline.reduce(ReferencePipeline.java:662) (107 samples, 0.34%)</title><rect x="814.4" y="613" width="5.4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="814.4" _orig_width="5.4"/>
+<text x="817.4" y="623.5" _orig_x="817.41"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.GarbageCleaner.clean(GarbageCleaner.java:160) (1,021 samples, 3.23%)</title><rect x="1450.2" y="581" width="51.1" height="15.0" fill="rgb(255,184,0)" rx="2" ry="2" _orig_x="1450.2" _orig_width="51.1"/>
+<text x="1453.2" y="591.5" _orig_x="1453.22">org.e..</text>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.awaitNanos(AbstractQueuedSynchronizer.java:1672) (1,754 samples, 5.55%)</title><rect x="10" y="565" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="575.5" _orig_x="13.00">java.util.c..</text>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.GarbageCleaner.markUnreachableAsGCRoots(GarbageCleaner.java:935) (1,019 samples, 3.23%)</title><rect x="1450.3" y="565" width="51" height="15.0" fill="rgb(255,184,0)" rx="2" ry="2" _orig_x="1450.3" _orig_width="51.0"/>
+<text x="1453.3" y="575.5" _orig_x="1453.32">org.e..</text>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.progress.ProgressViewerLabelProvider.getText(ProgressViewerLabelProvider.java:28) (4 samples, 0.01%)</title><rect x="1512.7" y="117" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="127.5" _orig_x="1515.66"/>
+</g>
+<g class="">
+<title>java.lang.reflect.AccessibleObject.slowVerifyAccess(AccessibleObject.java:715) (4 samples, 0.01%)</title><rect x="829.6" y="565" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.6" _orig_width="0.2"/>
+<text x="832.6" y="575.5" _orig_x="832.57"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:512) (27 samples, 0.09%)</title><rect x="821.1" y="565" width="1.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="821.1" _orig_width="1.3"/>
+<text x="824.1" y="575.5" _orig_x="824.06"/>
+</g>
+<g class="">
+<title>sun.management.spi.PlatformMBeanProvider$PlatformComponent.getMBeans(PlatformMBeanProvider.java:195) (5 samples, 0.02%)</title><rect x="820.4" y="629" width="0.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.4" _orig_width="0.3"/>
+<text x="823.4" y="639.5" _orig_x="823.41"/>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline$3$1.accept(ReferencePipeline.java:197) (5 samples, 0.02%)</title><rect x="828.4" y="437" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.4" _orig_width="0.2"/>
+<text x="831.4" y="447.5" _orig_x="831.37"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.internal.win32.OS.SetTimer(Native Method) (13 samples, 0.04%)</title><rect x="1511.3" y="229" width="0.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.3" _orig_width="0.6"/>
+<text x="1514.3" y="239.5" _orig_x="1514.26"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:521) (2 samples, 0.01%)</title><rect x="824.1" y="501" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="824.1" _orig_width="0.1"/>
+<text x="827.1" y="511.5" _orig_x="827.11"/>
+</g>
+<g class="">
+<title>org.eclipse.e4.core.internal.contexts.EclipseContext.getParent(EclipseContext.java:419) (2 samples, 0.01%)</title><rect x="1516.8" y="293" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.8" _orig_width="0.1"/>
+<text x="1519.8" y="303.5" _orig_x="1519.76"/>
+</g>
+<g class="">
+<title>Equinox Log Thread - Equinox Container: UUID (8 samples, 0.03%)</title><rect x="536.5" y="677" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="536.5" _orig_width="0.4"/>
+<text x="539.5" y="687.5" _orig_x="539.50"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:190) (1,751 samples, 5.54%)</title><rect x="536.9" y="629" width="87.6" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="536.9" _orig_width="87.6"/>
+<text x="539.9" y="639.5" _orig_x="539.90">java.lang.O..</text>
+</g>
+<g class="">
+<title>org.eclipse.core.databinding.observable.Realm.runWithDefault(Realm.java:339) (1,753 samples, 5.55%)</title><rect x="1502.3" y="421" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="431.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory$PlatformMBeanFinder.lambda$findSingleton$1(ManagementFactory.java:991) (81 samples, 0.26%)</title><rect x="815.3" y="501" width="4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="815.3" _orig_width="4.0"/>
+<text x="818.3" y="511.5" _orig_x="818.26"/>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder.getDynamicDTFJDump(DTFJIndexBuilder.java:9372) (9 samples, 0.03%)</title><rect x="1449.8" y="533" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.8" _orig_width="0.4"/>
+<text x="1452.8" y="543.5" _orig_x="1452.77"/>
+</g>
+<g class="">
+<title>org.eclipse.equinox.launcher.Main.basicRun(Main.java:588) (1,755 samples, 5.56%)</title><rect x="1502.2" y="645" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.2" _orig_width="87.8"/>
+<text x="1505.2" y="655.5" _orig_x="1505.20">org.eclipse..</text>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.snapshot.ObjectMarker.countMarked(ObjectMarker.java:177) (478 samples, 1.51%)</title><rect x="1450.3" y="533" width="23.9" height="15.0" fill="rgb(255,192,0)" rx="2" ry="2" _orig_x="1450.3" _orig_width="23.9"/>
+<text x="1453.3" y="543.5" _orig_x="1453.32">o..</text>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.run(EventManager.java:337) (1,753 samples, 5.55%)</title><rect x="1097.7" y="661" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1097.7" _orig_width="87.7"/>
+<text x="1100.7" y="671.5" _orig_x="1100.67">org.eclipse...</text>
+</g>
+<g class="">
+<title>java.util.stream.ReferencePipeline.&lt;init&gt;(ReferencePipeline.java:96) (2 samples, 0.01%)</title><rect x="827.9" y="517" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="827.9" _orig_width="0.1"/>
+<text x="830.9" y="527.5" _orig_x="830.87"/>
+</g>
+<g class="">
+<title>java.util.HashSet.iterator(HashSet.java:174) (2 samples, 0.01%)</title><rect x="817" y="437" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="817.0" _orig_width="0.1"/>
+<text x="820" y="447.5" _orig_x="820.01"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:239) (17 samples, 0.05%)</title><rect x="828" y="549" width="0.8" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.0" _orig_width="0.8"/>
+<text x="831" y="559.5" _orig_x="830.97"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:77) (4 samples, 0.01%)</title><rect x="819.9" y="613" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="819.9" _orig_width="0.2"/>
+<text x="822.9" y="623.5" _orig_x="822.86"/>
+</g>
+<g class="">
+<title>com.sun.management.OperatingSystemMXBean.getSystemCpuLoad(OperatingSystemMXBean.java:153) (171 samples, 0.54%)</title><rect x="805.6" y="661" width="8.5" height="15.0" fill="rgb(255,197,0)" rx="2" ry="2" _orig_x="805.6" _orig_width="8.5"/>
+<text x="808.6" y="671.5" _orig_x="808.55"/>
+</g>
+<g class="">
+<title>java.lang.management.ManagementFactory.getPlatformMXBean(ManagementFactory.java:689) (3 samples, 0.01%)</title><rect x="828.8" y="597" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.8" _orig_width="0.2"/>
+<text x="831.8" y="607.5" _orig_x="831.82"/>
+</g>
+<g class="">
+<title>org.eclipse.core.internal.jobs.WorkerPool.startJob(WorkerPool.java:258) (2 samples, 0.01%)</title><rect x="1448.8" y="645" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1448.8" _orig_width="0.1"/>
+<text x="1451.8" y="655.5" _orig_x="1451.82"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.memory.MemoryDataProvider.getPhysicalMemorySizeImpl(MemoryDataProvider.java:74) (46 samples, 0.15%)</title><rect x="829.4" y="629" width="2.3" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.4" _orig_width="2.3"/>
+<text x="832.4" y="639.5" _orig_x="832.42"/>
+</g>
+<g class="">
+<title>Common-Cleaner (1,755 samples, 5.56%)</title><rect x="361" y="677" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="361.0" _orig_width="87.8"/>
+<text x="364" y="687.5" _orig_x="364.00">Common-C..</text>
+</g>
+<g class="">
+<title>java.lang.Iterable.forEach(Iterable.java:75) (2 samples, 0.01%)</title><rect x="1516.3" y="181" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="191.5" _orig_x="1519.31"/>
+</g>
+<g class="">
+<title>org.eclipse.jface.util.Throttler.throttledExec(Throttler.java:94) (2 samples, 0.01%)</title><rect x="1516.3" y="133" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="143.5" _orig_x="1519.31"/>
+</g>
+<g class="">
+<title>com.ibm.java.lang.management.internal.ComponentBuilder$Component.mbeanInterfaceNames(ComponentBuilder.java:80) (30 samples, 0.09%)</title><rect x="825.5" y="437" width="1.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="825.5" _orig_width="1.5"/>
+<text x="828.5" y="447.5" _orig_x="828.46"/>
+</g>
+<g class="">
+<title>org.eclipse.jface.util.Throttler.lambda$0(Throttler.java:59) (2 samples, 0.01%)</title><rect x="1516.3" y="101" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.3" _orig_width="0.1"/>
+<text x="1519.3" y="111.5" _orig_x="1519.31"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.wrapSink(AbstractPipeline.java:559) (5 samples, 0.02%)</title><rect x="822.2" y="549" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.2" _orig_width="0.2"/>
+<text x="825.2" y="559.5" _orig_x="825.16"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:239) (71 samples, 0.22%)</title><rect x="823.9" y="549" width="3.6" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="823.9" _orig_width="3.6"/>
+<text x="826.9" y="559.5" _orig_x="826.91"/>
+</g>
+<g class="">
+<title>java.util.HashSet.add(HashSet.java:221) (32 samples, 0.10%)</title><rect x="817.7" y="469" width="1.6" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="817.7" _orig_width="1.6"/>
+<text x="820.7" y="479.5" _orig_x="820.66"/>
+</g>
+<g class="">
+<title>org.eclipse.jface.operation.AccumulatingProgressMonitor$Collector.run(AccumulatingProgressMonitor.java:117) (2 samples, 0.01%)</title><rect x="1516.2" y="261" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.2" _orig_width="0.1"/>
+<text x="1519.2" y="271.5" _orig_x="1519.21"/>
+</g>
+<g class="">
+<title>org.eclipse.core.runtime.adaptor.EclipseStarter.run(EclipseStarter.java:439) (1,753 samples, 5.55%)</title><rect x="1502.3" y="533" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="543.5" _orig_x="1505.30">org.eclipse...</text>
+</g>
+<g class="">
+<title>java.lang.reflect.Method.invoke(Method.java:574) (38 samples, 0.12%)</title><rect x="829.8" y="613" width="1.9" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="829.8" _orig_width="1.9"/>
+<text x="832.8" y="623.5" _orig_x="832.82"/>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaRuntime.findClass(PHDJavaRuntime.java:283) (3 samples, 0.01%)</title><rect x="1449.4" y="485" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.4" _orig_width="0.2"/>
+<text x="1452.4" y="495.5" _orig_x="1452.42"/>
+</g>
+<g class="">
+<title>IntIndexStreamer-Compressor (25 samples, 0.08%)</title><rect x="919.6" y="677" width="1.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="919.6" _orig_width="1.2"/>
+<text x="922.6" y="687.5" _orig_x="922.57"/>
+</g>
+<g>
+<title>org.eclipse.mat.dtfj.DTFJIndexBuilder.processHeapObject(DTFJIndexBuilder.java:4189) (2 samples, 0.01%)</title><rect x="1449.6" y="565" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.6" _orig_width="0.1"/>
+<text x="1452.6" y="575.5" _orig_x="1452.62"/>
+</g>
+<g class="">
+<title>java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:522) (10 samples, 0.03%)</title><rect x="828.1" y="501" width="0.5" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="828.1" _orig_width="0.5"/>
+<text x="831.1" y="511.5" _orig_x="831.12"/>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.progress.ProgressCanvasViewer.lambda$1(ProgressCanvasViewer.java:165) (4 samples, 0.01%)</title><rect x="1512.7" y="133" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.7" _orig_width="0.2"/>
+<text x="1515.7" y="143.5" _orig_x="1515.66"/>
+</g>
+<g>
+<title>org.eclipse.mat.parser.internal.SnapshotFactoryImpl.parse(SnapshotFactoryImpl.java:476) (5 samples, 0.02%)</title><rect x="1501.9" y="597" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1501.9" _orig_width="0.2"/>
+<text x="1504.9" y="607.5" _orig_x="1504.90"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.threads.ThreadDataProvider.getJMXData(ThreadDataProvider.java:44) (1,755 samples, 5.56%)</title><rect x="831.8" y="661" width="87.8" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="831.8" _orig_width="87.8"/>
+<text x="834.8" y="671.5" _orig_x="834.77">com.ibm.j..</text>
+</g>
+<g class="">
+<title>org.eclipse.jface.dialogs.ProgressMonitorDialog$ProgressMonitor.subTask(ProgressMonitorDialog.java:230) (2 samples, 0.01%)</title><rect x="1516.2" y="229" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.2" _orig_width="0.1"/>
+<text x="1519.2" y="239.5" _orig_x="1519.21"/>
+</g>
+<g class="">
+<title>com.ibm.java.diagnostics.healthcenter.agent.dataproviders.memory.MemoryDataProvider.getMemoryInformation(MemoryDataProvider.java:31) (3 samples, 0.01%)</title><rect x="822.7" y="645" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="822.7" _orig_width="0.1"/>
+<text x="825.7" y="655.5" _orig_x="825.66"/>
+</g>
+<g class="">
+<title>EMF Reference Cleaner (1,753 samples, 5.55%)</title><rect x="448.8" y="677" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="448.8" _orig_width="87.7"/>
+<text x="451.8" y="687.5" _orig_x="451.80">EMF Refer..</text>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.windowProc(Display.java:5037) (2 samples, 0.01%)</title><rect x="1512.4" y="293" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1512.4" _orig_width="0.1"/>
+<text x="1515.4" y="303.5" _orig_x="1515.36"/>
+</g>
+<g class="">
+<title>org.eclipse.equinox.internal.app.EclipseAppHandle.run(EclipseAppHandle.java:208) (1,753 samples, 5.55%)</title><rect x="1502.3" y="485" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="495.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g>
+<title>jdk.internal.misc.Unsafe.park(Native Method) (8 samples, 0.03%)</title><rect x="1474.8" y="453" width="0.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1474.8" _orig_width="0.4"/>
+<text x="1477.8" y="463.5" _orig_x="1477.78"/>
+</g>
+<g>
+<title>java.util.HashMap.get(HashMap.java:556) (3 samples, 0.01%)</title><rect x="1449.4" y="469" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.4" _orig_width="0.2"/>
+<text x="1452.4" y="479.5" _orig_x="1452.42"/>
+</g>
+<g class="">
+<title>java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1122) (1,754 samples, 5.55%)</title><rect x="10" y="629" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="10.0" _orig_width="87.7"/>
+<text x="13" y="639.5" _orig_x="13.00">java.util.c..</text>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.Workbench.createAndRunWorkbench(Workbench.java:546) (1,753 samples, 5.55%)</title><rect x="1502.3" y="437" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="1502.3" _orig_width="87.7"/>
+<text x="1505.3" y="447.5" _orig_x="1505.30">org.eclipse..</text>
+</g>
+<g class="">
+<title>java.util.stream.ReduceOps$ReduceOp.evaluateSequential(ReduceOps.java:921) (104 samples, 0.33%)</title><rect x="814.6" y="581" width="5.2" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="814.6" _orig_width="5.2"/>
+<text x="817.6" y="591.5" _orig_x="817.56"/>
+</g>
+<g class="">
+<title>ForkJoinPool.commonPool-worker-X (108 samples, 0.34%)</title><rect x="624.7" y="677" width="5.4" height="15.0" fill="rgb(255,198,0)" rx="2" ry="2" _orig_x="624.7" _orig_width="5.4"/>
+<text x="627.7" y="687.5" _orig_x="627.65"/>
+</g>
+<g class="">
+<title>java.lang.Object.wait(Object.java:190) (1,754 samples, 5.55%)</title><rect x="630.1" y="629" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="630.1" _orig_width="87.7"/>
+<text x="633.1" y="639.5" _orig_x="633.05">java.lang.O..</text>
+</g>
+<g>
+<title>com.ibm.dtfj.phd.PHDJavaObject$1.next(PHDJavaObject.java:322) (3 samples, 0.01%)</title><rect x="1449.4" y="517" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1449.4" _orig_width="0.2"/>
+<text x="1452.4" y="527.5" _orig_x="1452.42"/>
+</g>
+<g class="">
+<title>org.eclipse.swt.widgets.Display.messageProc(Display.java:3291) (44 samples, 0.14%)</title><rect x="1510" y="293" width="2.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1510.0" _orig_width="2.2"/>
+<text x="1513" y="303.5" _orig_x="1512.95"/>
+</g>
+<g class="">
+<title>Gogo shell (1,753 samples, 5.55%)</title><rect x="717.8" y="677" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="717.8" _orig_width="87.7"/>
+<text x="720.8" y="687.5" _orig_x="720.80">Gogo shell </text>
+</g>
+<g class="">
+<title>org.eclipse.jface.dialogs.Dialog.shortenText(Dialog.java:361) (2 samples, 0.01%)</title><rect x="1516.2" y="213" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1516.2" _orig_width="0.1"/>
+<text x="1519.2" y="223.5" _orig_x="1519.21"/>
+</g>
+<g class="">
+<title>java.util.HashMap.putVal(HashMap.java:663) (2 samples, 0.01%)</title><rect x="820.3" y="565" width="0.1" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="820.3" _orig_width="0.1"/>
+<text x="823.3" y="575.5" _orig_x="823.31"/>
+</g>
+<g class="">
+<title>org.eclipse.osgi.framework.eventmgr.EventManager$EventThread.run(EventManager.java:337) (1,754 samples, 5.55%)</title><rect x="922.2" y="661" width="87.7" height="15.0" fill="rgb(255,122,0)" rx="2" ry="2" _orig_x="922.2" _orig_width="87.7"/>
+<text x="925.2" y="671.5" _orig_x="925.17">org.eclipse...</text>
+</g>
+<g class="">
+<title>org.eclipse.ui.internal.HeapStatus$1.run(HeapStatus.java:81) (4 samples, 0.01%)</title><rect x="1511.9" y="261" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="1511.9" _orig_width="0.2"/>
+<text x="1514.9" y="271.5" _orig_x="1514.91"/>
+</g>
+<g class="">
+<title>java.util.concurrent.locks.LockSupport.parkUntil(LockSupport.java:410) (28 samples, 0.09%)</title><rect x="628.7" y="613" width="1.4" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="628.7" _orig_width="1.4"/>
+<text x="631.7" y="623.5" _orig_x="631.65"/>
+</g>
+<g class="">
+<title>java.util.HashSet.&lt;init&gt;(HashSet.java:146) (4 samples, 0.01%)</title><rect x="819.9" y="597" width="0.2" height="15.0" fill="rgb(255,199,0)" rx="2" ry="2" _orig_x="819.9" _orig_width="0.2"/>
+<text x="822.9" y="607.5" _orig_x="822.86"/>
+</g>
+</g>
+</svg>
